@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Panel del dealer — Cartel Mexicano</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="table black" style="max-width:600px">
+  <div class="brand">CARTEL MEXICANO</div>
+  <div class="brand-sub">PANEL DEL DEALER</div>
+
+  <div class="panel">
+    <div class="row">
+      <input type="password" id="secret" placeholder="Tu clave de dealer (ADMIN_SECRET)">
+      <button id="loadBtn">Ver jugadores</button>
+    </div>
+    <div class="error" id="err"></div>
+  </div>
+
+  <div class="panel" id="usersPanel" style="display:none">
+    <div id="usersList"></div>
+  </div>
+
+  <div class="panel" id="rechargePanel" style="display:none">
+    <div class="row">
+      <select id="userSelect"></select>
+      <input type="number" id="amount" placeholder="Monto a agregar">
+      <button id="rechargeBtn">Recargar</button>
+    </div>
+    <div class="msg" id="rechargeMsg"></div>
+  </div>
+</div>
+
+<script>
+  var el = {
+    secret: document.getElementById('secret'), loadBtn: document.getElementById('loadBtn'), err: document.getElementById('err'),
+    usersPanel: document.getElementById('usersPanel'), usersList: document.getElementById('usersList'),
+    rechargePanel: document.getElementById('rechargePanel'), userSelect: document.getElementById('userSelect'),
+    amount: document.getElementById('amount'), rechargeBtn: document.getElementById('rechargeBtn'), rechargeMsg: document.getElementById('rechargeMsg')
+  };
+
+  function loadUsers(){
+    el.err.textContent = '';
+    fetch('/api/admin/users', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({adminSecret: el.secret.value}) })
+      .then(function(r){ return r.json(); }).then(function(data){
+        if(data.error){ el.err.textContent = data.error; return; }
+        el.usersList.innerHTML = '';
+        el.userSelect.innerHTML = '';
+        data.forEach(function(u){
+          var row = document.createElement('div');
+          row.style.padding = '6px 0'; row.style.borderTop = '1px solid rgba(255,255,255,0.08)'; row.style.fontSize='13px';
+          row.innerHTML = '<b style="color:var(--gold)">'+(u.first_name||u.username||u.telegram_id)+'</b> — $'+u.balance;
+          el.usersList.appendChild(row);
+          var opt = document.createElement('option');
+          opt.value = u.telegram_id;
+          opt.textContent = (u.first_name||u.username||u.telegram_id) + ' — $' + u.balance;
+          el.userSelect.appendChild(opt);
+        });
+        el.usersPanel.style.display = '';
+        el.rechargePanel.style.display = data.length ? '' : 'none';
+      });
+  }
+
+  el.loadBtn.addEventListener('click', loadUsers);
+  el.rechargeBtn.addEventListener('click', function(){
+    var telegramId = el.userSelect.value;
+    var amount = parseInt(el.amount.value, 10);
+    if(!amount){ el.rechargeMsg.textContent = 'Escribe un monto.'; return; }
+    fetch('/api/admin/recharge', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ adminSecret: el.secret.value, telegramId: telegramId, amount: amount }) })
+      .then(function(r){ return r.json(); }).then(function(data){
+        if(data.error){ el.rechargeMsg.textContent = data.error; return; }
+        el.rechargeMsg.textContent = 'Listo — nuevo saldo: $' + data.balance;
+        el.amount.value = '';
+        loadUsers();
+      });
+  });
+</script>
+</body>
+</html>

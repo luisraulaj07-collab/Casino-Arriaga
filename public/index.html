@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Cartel Mexicano — Casino</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="table black">
+  <div class="brand">CARTEL MEXICANO — CASA</div>
+  <div class="brand-sub">MESA PRINCIPAL</div>
+
+  <div class="hud">
+    <div>Jugador<br><b id="name">—</b></div>
+    <div style="text-align:right">Saldo<br><b id="balance">—</b></div>
+  </div>
+
+  <div class="error" id="err"></div>
+
+  <div class="panel">
+    <div class="controls" style="flex-direction:column">
+      <a href="blackjack.html" style="width:100%"><button style="width:100%">🃏 Jugar Blackjack</button></a>
+      <a href="roulette.html" style="width:100%"><button style="width:100%">🎡 Jugar Ruleta</button></a>
+    </div>
+  </div>
+
+  <div class="msg" id="hint">Si tu saldo aparece en $0, pídele al dealer que te recargue.</div>
+</div>
+
+<script>
+  var tg = window.Telegram.WebApp;
+  tg.ready(); tg.expand();
+  var initData = tg.initData;
+
+  fetch('/api/me', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ initData: initData })
+  }).then(function(r){ return r.json(); }).then(function(data){
+    if(data.error){ document.getElementById('err').textContent = data.error; return; }
+    document.getElementById('name').textContent = data.name;
+    document.getElementById('balance').textContent = '$' + data.balance;
+    sessionStorage.setItem('cmng_initData', initData);
+  }).catch(function(){
+    document.getElementById('err').textContent = 'Abre esto desde el bot de Telegram, no desde un navegador normal.';
+  });
+</script>
+</body>
+</html>
