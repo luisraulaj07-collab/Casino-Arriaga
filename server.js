@@ -16,6 +16,7 @@ if (!BOT_TOKEN) {
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
 // Servir la página principal del casino
 app.get('/', function (req, res) {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -36,22 +37,31 @@ function requireAdmin(req, res, next) {
 }
 
 // ---------- Perfil / saldo ----------
-app.post('/api/me', requireTelegramUser, function (req, res) {
-  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-  res.json({ id: u.telegram_id, name: u.first_name || u.username || ('Jugador ' + u.telegram_id), balance: u.balance });
+app.post('/api/me', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    res.json({ id: u.telegram_id, name: u.first_name || u.username || ('Jugador ' + u.telegram_id), balance: u.balance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ---------- Panel del dealer ----------
-app.post('/api/admin/users', requireAdmin, function (req, res) {
-  res.json(listUsers());
+app.post('/api/admin/users', requireAdmin, async function (req, res) {
+  try {
+    var users = await listUsers();
+    res.json(users);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.post('/api/admin/recharge', requireAdmin, function (req, res) {
+app.post('/api/admin/recharge', requireAdmin, async function (req, res) {
   var telegramId = parseInt(req.body.telegramId, 10);
   var amount = parseInt(req.body.amount, 10);
   if (!telegramId || !amount) return res.status(400).json({ error: 'Faltan datos.' });
   try {
-    var newBalance = applyDelta(telegramId, amount, 'recarga', 'Recarga autorizada por el dealer');
+    var newBalance = await applyDelta(telegramId, amount, 'recarga', 'Recarga autorizada por el dealer');
     res.json({ ok: true, balance: newBalance });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -91,73 +101,90 @@ function publicState(session, revealDealer) {
   };
 }
 
-app.post('/api/blackjack/deal', requireTelegramUser, function (req, res) {
-  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-  var bet = parseInt(req.body.bet, 10);
-  if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
-  if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
+app.post('/api/blackjack/deal', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var bet = parseInt(req.body.bet, 10);
+    if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+    if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
 
-  var deck = freshDeck();
-  var session = { deck: deck, playerHand: [deck.pop(), deck.pop()], dealerHand: [deck.pop(), deck.pop()], bet: bet };
-  blackjackSessions[req.tgUser.id] = session;
+    var deck = freshDeck();
+    var session = { deck: deck, playerHand: [deck.pop(), deck.pop()], dealerHand: [deck.pop(), deck.pop()], bet: bet };
+    blackjackSessions[req.tgUser.id] = session;
 
-  if (isBlackjack(session.playerHand)) {
-    var dealerBJ = isBlackjack(session.dealerHand);
-    var delta = dealerBJ ? 0 : Math.floor(bet * 1.5);
-    var newBalance = applyDelta(req.tgUser.id, delta, 'blackjack', dealerBJ ? 'Empate — ambos blackjack' : 'Blackjack — paga 3 a 2');
-    delete blackjackSessions[req.tgUser.id];
-    return res.json({ status: dealerBJ ? 'push' : 'blackjack', state: publicState(session, true), balance: newBalance, delta: delta });
+    if (isBlackjack(session.playerHand)) {
+      var dealerBJ = isBlackjack(session.dealerHand);
+      var delta = dealerBJ ? 0 : Math.floor(bet * 1.5);
+      var newBalance = await applyDelta(req.tgUser.id, delta, 'blackjack', dealerBJ ? 'Empate — ambos blackjack' : 'Blackjack — paga 3 a 2');
+      delete blackjackSessions[req.tgUser.id];
+      return res.json({ status: dealerBJ ? 'push' : 'blackjack', state: publicState(session, true), balance: newBalance, delta: delta });
+    }
+    res.json({ status: 'playing', state: publicState(session, false), balance: u.balance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  res.json({ status: 'playing', state: publicState(session, false), balance: u.balance });
 });
 
-app.post('/api/blackjack/hit', requireTelegramUser, function (req, res) {
-  var session = blackjackSessions[req.tgUser.id];
-  if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
-  session.playerHand.push(session.deck.pop());
-  var total = handTotal(session.playerHand);
-  if (total > 21) {
-    var newBalance = applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Se pasó de 21');
-    delete blackjackSessions[req.tgUser.id];
-    return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
+app.post('/api/blackjack/hit', requireTelegramUser, async function (req, res) {
+  try {
+    var session = blackjackSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
+    session.playerHand.push(session.deck.pop());
+    var total = handTotal(session.playerHand);
+    if (total > 21) {
+      var newBalance = await applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Se pasó de 21');
+      delete blackjackSessions[req.tgUser.id];
+      return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
+    }
+    var currentUser = await getUser(req.tgUser.id);
+    res.json({ status: 'playing', state: publicState(session, false), balance: currentUser.balance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  res.json({ status: 'playing', state: publicState(session, false), balance: getUser(req.tgUser.id).balance });
 });
 
-function dealerPlayAndResolve(telegramId, session) {
+async function dealerPlayAndResolve(telegramId, session) {
   while (handTotal(session.dealerHand) < 17) session.dealerHand.push(session.deck.pop());
   var p = handTotal(session.playerHand), d = handTotal(session.dealerHand);
   var status, delta;
   if (d > 21 || p > d) { status = 'win'; delta = session.bet; }
   else if (p < d) { status = 'lose'; delta = -session.bet; }
   else { status = 'push'; delta = 0; }
-  var newBalance = applyDelta(telegramId, delta, 'blackjack', 'Resultado: ' + status);
+  var newBalance = await applyDelta(telegramId, delta, 'blackjack', 'Resultado: ' + status);
   delete blackjackSessions[telegramId];
   return { status: status, balance: newBalance, delta: delta };
 }
 
-app.post('/api/blackjack/stand', requireTelegramUser, function (req, res) {
-  var session = blackjackSessions[req.tgUser.id];
-  if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
-  var result = dealerPlayAndResolve(req.tgUser.id, session);
-  res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
+app.post('/api/blackjack/stand', requireTelegramUser, async function (req, res) {
+  try {
+    var session = blackjackSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
+    var result = await dealerPlayAndResolve(req.tgUser.id, session);
+    res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.post('/api/blackjack/double', requireTelegramUser, function (req, res) {
-  var session = blackjackSessions[req.tgUser.id];
-  if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
-  var u = getUser(req.tgUser.id);
-  if (session.bet * 2 > u.balance + session.bet) return res.status(400).json({ error: 'Saldo insuficiente para doblar.' });
-  session.bet = session.bet * 2;
-  session.playerHand.push(session.deck.pop());
-  var total = handTotal(session.playerHand);
-  if (total > 21) {
-    var newBalance = applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Se pasó de 21 al doblar');
-    delete blackjackSessions[req.tgUser.id];
-    return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
+app.post('/api/blackjack/double', requireTelegramUser, async function (req, res) {
+  try {
+    var session = blackjackSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
+    var u = await getUser(req.tgUser.id);
+    if (session.bet * 2 > u.balance + session.bet) return res.status(400).json({ error: 'Saldo insuficiente para doblar.' });
+    session.bet = session.bet * 2;
+    session.playerHand.push(session.deck.pop());
+    var total = handTotal(session.playerHand);
+    if (total > 21) {
+      var newBalance = await applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Se pasó de 21 al doblar');
+      delete blackjackSessions[req.tgUser.id];
+      return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
+    }
+    var result = await dealerPlayAndResolve(req.tgUser.id, session);
+    res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
-  var result = dealerPlayAndResolve(req.tgUser.id, session);
-  res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
 });
 
 // ---------- RULETA ----------
@@ -174,27 +201,31 @@ function spinWheel() {
   return order[order.length - 1];
 }
 
-app.post('/api/roulette/spin', requireTelegramUser, function (req, res) {
-  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-  var betType = req.body.betType;
-  var number = parseInt(req.body.number, 10);
-  var amount = parseInt(req.body.amount, 10);
-  if (!amount || amount <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
-  if (amount > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
-  if (betType === 'numero' && (isNaN(number) || number < 0 || number > 36)) return res.status(400).json({ error: 'Número inválido.' });
+app.post('/api/roulette/spin', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var betType = req.body.betType;
+    var number = parseInt(req.body.number, 10);
+    var amount = parseInt(req.body.amount, 10);
+    if (!amount || amount <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+    if (amount > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
+    if (betType === 'numero' && (isNaN(number) || number < 0 || number > 36)) return res.status(400).json({ error: 'Número inválido.' });
 
-  var winNumber = spinWheel();
-  var c = colorOf(winNumber);
-  var win = false, mult = 0;
-  if (betType === 'rojo') { win = c === 'red'; mult = 2; }
-  else if (betType === 'negro') { win = c === 'black'; mult = 2; }
-  else if (betType === 'numero') { win = number === winNumber; mult = (number === 0) ? 10 : 5; }
-  else return res.status(400).json({ error: 'Tipo de apuesta inválido.' });
+    var winNumber = spinWheel();
+    var c = colorOf(winNumber);
+    var win = false, mult = 0;
+    if (betType === 'rojo') { win = c === 'red'; mult = 2; }
+    else if (betType === 'negro') { win = c === 'black'; mult = 2; }
+    else if (betType === 'numero') { win = number === winNumber; mult = (number === 0) ? 10 : 5; }
+    else return res.status(400).json({ error: 'Tipo de apuesta inválido.' });
 
-  var delta = win ? amount * (mult - 1) : -amount;
-  var newBalance = applyDelta(req.tgUser.id, delta, 'ruleta', 'Salió ' + winNumber + ' (' + c + ')');
+    var delta = win ? amount * (mult - 1) : -amount;
+    var newBalance = await applyDelta(req.tgUser.id, delta, 'ruleta', 'Salió ' + winNumber + ' (' + c + ')');
 
-  res.json({ winNumber: winNumber, color: c, win: win, delta: delta, balance: newBalance });
+    res.json({ winNumber: winNumber, color: c, win: win, delta: delta, balance: newBalance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.listen(PORT, function () {
