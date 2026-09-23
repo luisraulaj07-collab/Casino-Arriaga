@@ -16,6 +16,10 @@ if (!BOT_TOKEN) {
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+// Servir la página principal del casino
+app.get('/', function (req, res) {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // ---------- Autenticación de cada request del jugador ----------
 function requireTelegramUser(req, res, next) {
