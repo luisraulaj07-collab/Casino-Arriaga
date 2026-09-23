@@ -1,0 +1,14 @@
+{
+  "name": "cartel-mexicano-casino",
+  "version": "1.0.0",
+  "description": "Mini App de Telegram para el casino de Cartel Mexicano Nueva Generación",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5"
+  }
+}
