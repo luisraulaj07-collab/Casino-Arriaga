@@ -147,12 +147,23 @@ app.post('/api/blackjack/hit', requireTelegramUser, async function (req, res) {
 });
 
 async function dealerPlayAndResolve(telegramId, session) {
+  var p = handTotal(session.playerHand);
+
+  // VALIDACIÓN DE SEGURIDAD ABSOLUTA: Si el jugador se pasó de 21, pierde de inmediato
+  if (p > 21) {
+    var newBalance = await applyDelta(telegramId, 0, 'blackjack', 'Derrota: Se pasó de 21');
+    delete blackjackSessions[telegramId];
+    return { status: 'lose', balance: newBalance, delta: -session.bet };
+  }
+
   while (handTotal(session.dealerHand) < 17) session.dealerHand.push(session.deck.pop());
-  var p = handTotal(session.playerHand), d = handTotal(session.dealerHand);
+  var d = handTotal(session.dealerHand);
   var status, delta;
+
   if (d > 21 || p > d) { status = 'win'; delta = session.bet; }
   else if (p < d) { status = 'lose'; delta = -session.bet; }
   else { status = 'push'; delta = 0; }
+
   // Al ganar se devuelve la apuesta original + ganancia neta (delta + session.bet)
   var totalReturn = delta > 0 ? session.bet + delta : (delta === 0 ? session.bet : 0);
   var newBalance = await applyDelta(telegramId, totalReturn, 'blackjack', 'Resultado: ' + status);
@@ -185,7 +196,6 @@ app.post('/api/blackjack/double', requireTelegramUser, async function (req, res)
     
     var total = handTotal(session.playerHand);
     if (total > 21) {
-      // Como ya se descontó todo, al perder no se resta más de golpe, solo se limpia la sesión
       delete blackjackSessions[req.tgUser.id];
       var currentUser = await getUser(req.tgUser.id);
       return res.json({ status: 'lose', state: publicState(session, true), balance: currentUser.balance, delta: -session.bet });
