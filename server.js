@@ -68,7 +68,7 @@ app.post('/api/admin/recharge', requireAdmin, async function (req, res) {
   }
 });
 
-// ---------- BLACKJACK (NUEVA LÓGICA: Se descuenta o acredita al final) ----------
+// ---------- BLACKJACK ----------
 const suits = [{ s: '♠', red: false }, { s: '♣', red: false }, { s: '♥', red: true }, { s: '♦', red: true }];
 const ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
 const blackjackSessions = {}; // telegram_id -> { deck, playerHand, dealerHand, bet }
@@ -108,14 +108,13 @@ app.post('/api/blackjack/deal', requireTelegramUser, async function (req, res) {
     if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
     if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
 
-    // AQUÍ YA NO DESCONTAMOS NADA. Solo validamos que tenga saldo y guardamos la sesión.
     var deck = freshDeck();
     var session = { deck: deck, playerHand: [deck.pop(), deck.pop()], dealerHand: [deck.pop(), deck.pop()], bet: bet };
     blackjackSessions[req.tgUser.id] = session;
 
     if (isBlackjack(session.playerHand)) {
       var dealerBJ = isBlackjack(session.dealerHand);
-      var delta = dealerBJ ? 0 : Math.floor(bet * 1.5); // Si gana con BJ gana 1.5x, si es empate delta es 0
+      var delta = dealerBJ ? 0 : Math.floor(bet * 1.5);
       var newBalance = u.balance;
       if (!dealerBJ) {
         newBalance = await applyDelta(req.tgUser.id, delta, 'blackjack', 'Blackjack — paga 3 a 2');
@@ -138,7 +137,6 @@ app.post('/api/blackjack/hit', requireTelegramUser, async function (req, res) {
     var total = handTotal(session.playerHand);
     
     if (total > 21) {
-      // Se pasó: aquí SÍ se descuenta la apuesta porque perdió
       var newBalance = await applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Se pasó de 21');
       delete blackjackSessions[req.tgUser.id];
       return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
@@ -164,9 +162,9 @@ async function dealerPlayAndResolve(telegramId, session) {
   var d = handTotal(session.dealerHand);
   var status, delta = 0;
 
-  if (d > 21 || p > d) { status = 'win'; delta = session.bet; } // Gana: se le suma su ganancia
-  else if (p < d) { status = 'lose'; delta = -session.bet; } // Pierde: se le descuenta
-  else { status = 'push'; delta = 0; } // Empate: no cambia nada
+  if (d > 21 || p > d) { status = 'win'; delta = session.bet; }
+  else if (p < d) { status = 'lose'; delta = -session.bet; }
+  else { status = 'push'; delta = 0; }
 
   var newBalance = await applyDelta(telegramId, delta, 'blackjack', 'Resultado: ' + status);
   delete blackjackSessions[telegramId];
@@ -190,10 +188,9 @@ app.post('/api/blackjack/double', requireTelegramUser, async function (req, res)
     if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
     var u = await getUser(req.tgUser.id);
     
-    // Para doblar, validamos que tenga suficiente saldo para duplicar la apuesta actual
     if (session.bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente para doblar.' });
     
-    session.bet = session.bet * 2; // Duplicamos la apuesta en juego (se descontará si pierde al final)
+    session.bet = session.bet * 2;
     session.playerHand.push(session.deck.pop());
     
     var total = handTotal(session.playerHand);
@@ -205,6 +202,21 @@ app.post('/api/blackjack/double', requireTelegramUser, async function (req, res)
     
     var result = await dealerPlayAndResolve(req.tgUser.id, session);
     res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Ruta para cobrar la apuesta si el jugador abandona con una mano activa
+app.post('/api/blackjack/abandon', requireTelegramUser, async function (req, res) {
+  try {
+    var session = blackjackSessions[req.tgUser.id];
+    if (!session) return res.json({ ok: true, active: false });
+
+    var newBalance = await applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Abandonó la partida con mano activa');
+    delete blackjackSessions[req.tgUser.id];
+    
+    res.json({ ok: true, active: true, balance: newBalance });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -242,7 +254,6 @@ app.post('/api/roulette/spin', requireTelegramUser, async function (req, res) {
     else if (betType === 'numero') { win = number === winNumber; mult = (number === 0) ? 10 : 5; }
     else return res.status(400).json({ error: 'Tipo de apuesta inválido.' });
 
-    // Ruleta: Si gana recibe su ganancia neta, si pierde se le resta la cantidad apostada
     var delta = win ? amount * (mult - 1) : -amount;
     var newBalance = await applyDelta(req.tgUser.id, delta, 'ruleta', 'Salió ' + winNumber + ' (' + c + ')');
 
