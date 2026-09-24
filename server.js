@@ -3,6 +3,7 @@ const express = require('express');
 const path = require('path');
 const { getOrCreateUser, getUser, listUsers, applyDelta } = require('./db');
 const { verifyInitData } = require('./telegramAuth');
+const pokerLogic = require('./pokerLogic');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
@@ -207,7 +208,6 @@ app.post('/api/blackjack/double', requireTelegramUser, async function (req, res)
   }
 });
 
-// Ruta para cobrar la apuesta si el jugador abandona con una mano activa
 app.post('/api/blackjack/abandon', requireTelegramUser, async function (req, res) {
   try {
     var session = blackjackSessions[req.tgUser.id];
@@ -258,6 +258,87 @@ app.post('/api/roulette/spin', requireTelegramUser, async function (req, res) {
     var newBalance = await applyDelta(req.tgUser.id, delta, 'ruleta', 'Salió ' + winNumber + ' (' + c + ')');
 
     res.json({ winNumber: winNumber, color: c, win: win, delta: delta, balance: newBalance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- VIDEO PÓKER (Jacks or Better) ----------
+const activePokerGames = {};
+
+app.post('/api/poker/deal', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var betAmount = parseInt(req.body.bet, 10);
+
+    if (!betAmount || betAmount <= 0) {
+      return res.status(400).json({ error: 'Apuesta inválida.' });
+    }
+    if (betAmount > u.balance) {
+      return res.status(400).json({ error: 'Saldo insuficiente.' });
+    }
+
+    // Descontar la apuesta inicial usando applyDelta
+    var newBalance = await applyDelta(req.tgUser.id, -betAmount, 'poker', 'Apuesta Video Póker');
+
+    var deck = pokerLogic.freshDeck();
+    var hand = deck.splice(0, 5);
+
+    activePokerGames[req.tgUser.id] = {
+      deck: deck,
+      hand: hand,
+      bet: betAmount
+    };
+
+    res.json({
+      hand: hand,
+      balance: newBalance
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/poker/draw', requireTelegramUser, async function (req, res) {
+  try {
+    var session = activePokerGames[req.tgUser.id];
+    if (!session) {
+      return res.status(400).json({ error: 'No hay una partida de póker activa.' });
+    }
+
+    var hand = session.hand;
+    var deck = session.deck;
+    var indexesToHold = req.body.heldIndexes || [];
+
+    for (let i = 0; i < 5; i++) {
+      if (!indexesToHold.includes(i)) {
+        if (deck.length > 0) {
+          hand[i] = deck.pop();
+        }
+      }
+    }
+
+    var resultType = pokerLogic.evalHand(hand);
+    var multiplier = pokerLogic.PAY_TABLE[resultType] || 0;
+    var winnings = session.bet * multiplier;
+
+    var finalBalance;
+    if (winnings > 0) {
+      // Sumar ganancia neta o total ganado según tu lógica (aquí sumamos el premio total obtenido)
+      finalBalance = await applyDelta(req.tgUser.id, winnings, 'poker', 'Premio Video Póker (' + resultType + ')');
+    } else {
+      finalBalance = (await getUser(req.tgUser.id)).balance;
+    }
+
+    delete activePokerGames[req.tgUser.id];
+
+    res.json({
+      hand: hand,
+      resultType: resultType,
+      multiplier: multiplier,
+      winnings: winnings,
+      balance: finalBalance
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
