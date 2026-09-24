@@ -46,7 +46,8 @@
     <button id="nextBtn">Siguiente mano</button>
   </div>
 
-  <a class="lobby-link" href="index.html">← Volver a la mesa principal</a>
+  <!-- Enlace con la advertencia de salida integrada -->
+  <a class="lobby-link" href="#" onclick="regresarAlLobby(event)">← Volver a la mesa principal</a>
 </div>
 
 <script>
@@ -98,6 +99,18 @@
   function showPlayPhase(){ el.betPanel.style.display='none'; el.playControls.style.display=''; el.nextControls.style.display='none'; }
   function showEndPhase(){ el.playControls.style.display='none'; el.nextControls.style.display=''; }
   function showBetPhase(){ el.betPanel.style.display=''; el.playControls.style.display='none'; el.nextControls.style.display='none'; el.dealerHand.innerHTML=''; el.playerHand.innerHTML=''; el.playerTotal.textContent=''; el.dealerTotal.textContent=''; }
+
+  // Función de seguridad para advertir al salir si la partida está activa
+  function regresarAlLobby(event) {
+    event.preventDefault();
+    // Si los controles de juego están visibles significa que hay una mano activa
+    var juegoActivo = el.playControls.style.display !== 'none';
+    if (juegoActivo) {
+      var confirmar = confirm("⚠️ ¡Atención!\nTienes una mano de Blackjack en curso. Si sales ahora, perderás tu apuesta.");
+      if (!confirmar) return;
+    }
+    window.location.href = 'index.html';
+  }
 
   function handleResult(d, actionLabel){
     if(d.error){ el.err.textContent = d.error; return; }
