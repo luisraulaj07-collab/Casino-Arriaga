@@ -46,7 +46,7 @@
     <button id="nextBtn">Siguiente mano</button>
   </div>
 
-  <!-- Enlace con la advertencia de salida integrada -->
+  <!-- Enlace con la advertencia y cobro automático al salir -->
   <a class="lobby-link" href="#" onclick="regresarAlLobby(event)">← Volver a la mesa principal</a>
 </div>
 
@@ -100,16 +100,23 @@
   function showEndPhase(){ el.playControls.style.display='none'; el.nextControls.style.display=''; }
   function showBetPhase(){ el.betPanel.style.display=''; el.playControls.style.display='none'; el.nextControls.style.display='none'; el.dealerHand.innerHTML=''; el.playerHand.innerHTML=''; el.playerTotal.textContent=''; el.dealerTotal.textContent=''; }
 
-  // Función de seguridad para advertir al salir si la partida está activa
+  // Función de seguridad para notificar al servidor, cobrar y regresar al lobby
   function regresarAlLobby(event) {
     event.preventDefault();
-    // Si los controles de juego están visibles significa que hay una mano activa
     var juegoActivo = el.playControls.style.display !== 'none';
+    
     if (juegoActivo) {
       var confirmar = confirm("⚠️ ¡Atención!\nTienes una mano de Blackjack en curso. Si sales ahora, perderás tu apuesta.");
       if (!confirmar) return;
+
+      api('/api/blackjack/abandon').then(function() {
+        window.location.href = 'index.html';
+      }).catch(function() {
+        window.location.href = 'index.html';
+      });
+    } else {
+      window.location.href = 'index.html';
     }
-    window.location.href = 'index.html';
   }
 
   function handleResult(d, actionLabel){
