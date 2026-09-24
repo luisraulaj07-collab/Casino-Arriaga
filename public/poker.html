@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Póker - Casino Privado</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body {
+      background-color: #0f172a;
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 15px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    h1 { font-size: 1.5rem; margin-bottom: 5px; color: #38bdf8; }
+    .user-info { font-size: 0.9rem; margin-bottom: 15px; color: #94a3b8; }
+    .balance-box { font-size: 1.2rem; font-weight: bold; color: #4ade80; margin-bottom: 15px; }
+    
+    /* Tabla de pagos */
+    .paytable {
+      font-size: 0.75rem;
+      background: #1e293b;
+      border-radius: 8px;
+      padding: 8px 12px;
+      margin-bottom: 15px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px 12px;
+      width: 100%;
+      max-width: 320px;
+    }
+    .paytable div { display: flex; justify-content: space-between; }
+
+    /* Cartas */
+    .cards-container {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 20px;
+      justify-content: center;
+    }
+    .card {
+      width: 55px;
+      height: 80px;
+      background: #ffffff;
+      color: #000;
+      border-radius: 6px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 4px;
+      font-weight: bold;
+      font-size: 1rem;
+      cursor: pointer;
+      position: relative;
+      border: 2px solid #cbd5e1;
+      user-select: none;
+      transition: transform 0.2s, background-color 0.2s;
+    }
+    .card.red { color: #dc2626; }
+    .card.held {
+      border-color: #eab308;
+      background-color: #fef9c3;
+      transform: translateY(-8px);
+    }
+    .hold-label {
+      font-size: 0.6rem;
+      text-align: center;
+      background: #eab308;
+      color: #000;
+      border-radius: 3px;
+      display: none;
+      font-weight: bold;
+    }
+    .card.held .hold-label { display: block; }
+
+    /* Controles */
+    .controls {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      width: 100%;
+      max-width: 300px;
+    }
+    .bet-row {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      align-items: center;
+    }
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      font-size: 1rem;
+      border-radius: 6px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    button:active { transform: scale(0.98); }
+    button:disabled { background: #475569; opacity: 0.7; cursor: not-allowed; }
+    .btn-action { background: #16a34a; width: 100%; }
+    input[type="number"] {
+      padding: 8px;
+      font-size: 1rem;
+      border-radius: 6px;
+      border: 1px solid #475569;
+      background: #1e293b;
+      color: white;
+      width: 100px;
+      text-align: center;
+    }
+    #message {
+      margin-top: 15px;
+      font-size: 0.95rem;
+      font-weight: bold;
+      text-align: center;
+      min-height: 24px;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Video Póker</h1>
+  <div class="user-info" id="username">Cargando usuario...</div>
+  <div class="balance-box">Saldo: <span id="balance">0</span> fichas</div>
+
+  <!-- Tabla de Pagos orientativa (x Apuesta) -->
+  <div class="paytable">
+    <div><span>Escalera Real</span><span>250x</span></div>
+    <div><span>Escalera de Color</span><span>50x</span></div>
+    <div><span>Póker</span><span>25x</span></div>
+    <div><span>Full House</span><span>6x</span></div>
+    <div><span>Color</span><span>5x</span></div>
+    <div><span>Escalera</span><span>4x</span></div>
+    <div><span>Trío</span><span>3x</span></div>
+    <div><span>Doble Par</span><span>2x</span></div>
+    <div><span>Jacks o Mejor</span><span>1x</span></div>
+  </div>
+
+  <div class="cards-container" id="cardsContainer">
+    <!-- Se generan dinámicamente -->
+    <div class="card">?</div>
+    <div class="card">?</div>
+    <div class="card">?</div>
+    <div class="card">?</div>
+    <div class="card">?</div>
+  </div>
+
+  <div class="controls">
+    <div class="bet-row" id="betControlSection">
+      <label for="betInput">Apuesta:</label>
+      <input type="number" id="betInput" value="10" min="1">
+    </div>
+    <button id="mainButton" class="btn-action" onclick="handleMainButtonClick()">Repartir</button>
+  </div>
+
+  <div id="message"></div>
+  <br>
+  <a href="/" style="color: #38bdf8; text-decoration: none; font-size: 0.85rem;">← Volver al Lobby</a>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.expand();
+    const initData = tg.initData || '';
+
+    let gameState = 'ready'; // 'ready' o 'hold_selection'
+    let currentHand = [];
+    let heldCards = [false, false, false, false, false];
+
+    async function fetchUserData() {
+      try {
+        const res = await fetch('/api/me', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ initData })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        document.getElementById('username').innerText = data.name;
+        document.getElementById('balance').innerText = data.balance;
+      } catch (e) {
+        document.getElementById('username').innerText = 'Modo Invitado / Error';
+      }
+    }
+
+    async function handleMainButtonClick() {
+      if (gameState === 'ready') {
+        const bet = parseInt(document.getElementById('betInput').value, 10);
+        if (!bet || bet <= 0) {
+          alert('Ingresa una apuesta válida');
+          return;
+        }
+
+        try {
+          const res = await fetch('/api/poker/deal', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData, bet })
+          });
+          const data = await res.json();
+          if (data.error) {
+            alert(data.error);
+            return;
+          }
+
+          document.getElementById('balance').innerText = data.balance;
+          currentHand = data.hand;
+          heldCards = [false, false, false, false, false];
+          gameState = 'hold_selection';
+
+          document.getElementById('betInput').disabled = true;
+          document.getElementById('mainButton').innerText = 'Cambiar / Jugar';
+          document.getElementById('message').innerText = 'Selecciona las cartas que deseas RETENER y presiona Cambiar.';
+          renderCards();
+        } catch (e) {
+          alert('Error de conexión al repartir');
+        }
+
+      } else if (gameState === 'hold_selection') {
+        // Recopilar índices retenidos
+        const heldIndexes = [];
+        heldCards.forEach((held, idx) => {
+          if (held) heldIndexes.push(idx);
+        });
+
+        try {
+          const res = await fetch('/api/poker/draw', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ initData, heldIndexes })
+          });
+          const data = await res.json();
+          if (data.error) {
+            alert(data.error);
+            return;
+          }
+
+          currentHand = data.hand;
+          document.getElementById('balance').innerText = data.balance;
+          renderCards(true); // Mostrar sin selección de retención
+
+          let msg = '';
+          if (data.winnings > 0) {
+            msg = `¡Ganaste ${data.winnings} fichas con ${data.resultType.toUpperCase()}!`;
+            document.getElementById('message').style.color = '#4ade80';
+          } else {
+            msg = 'No hubo premio esta vez. ¡Inténtalo de nuevo!';
+            document.getElementById('message').style.color = '#f87171';
+          }
+          document.getElementById('message').innerText = msg;
+
+          // Reiniciar para siguiente ronda
+          gameState = 'ready';
+          document.getElementById('betInput').disabled = false;
+          document.getElementById('mainButton').innerText = 'Repartir';
+        } catch (e) {
+          alert('Error de conexión al finalizar jugada');
+        }
+      }
+    }
+
+    function toggleHold(index) {
+      if (gameState !== 'hold_selection') return;
+      heldCards[index] = !heldCards[index];
+      renderCards();
+    }
+
+    function renderCards(final = false) {
+      const container = document.getElementById('cardsContainer');
+      container.innerHTML = '';
+
+      currentHand.forEach((c, idx) => {
+        const cardDiv = document.createElement('div');
+        cardDiv.className = 'card' + (c.red ? ' red' : '') + (heldCards[idx] && !final ? ' held' : '');
+        if (!final) {
+          cardDiv.onclick = () => toggleHold(idx);
+        }
+
+        cardDiv.innerHTML = `
+          <div style="font-size: 0.9rem;">${c.rank}</div>
+          <div style="font-size: 1.4rem; text-align: center;">${c.suit}</div>
+          <div class="hold-label">RETENER</div>
+        `;
+        container.appendChild(cardDiv);
+      });
+    }
+
+    fetchUserData();
+  </script>
+</body>
+</html>
