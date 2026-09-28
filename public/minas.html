@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Minas — Cartel Mexicano</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="style.css">
+<style>
+.g{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin:10px 0}
+.c{aspect-ratio:1;background:#1c1c1c;border:1px solid var(--line);border-radius:8px;font-size:26px;cursor:pointer;color:var(--cream);padding:0}
+.c:disabled{cursor:default}
+.c.ok{background:#12351f;border-color:#2d7a4a}
+.c.bomb{background:#4a1616;border-color:#a83232}
+.c.dim{opacity:.45}
+</style>
+</head>
+<body>
+<div class="table black">
+  <div class="brand">CARTEL MEXICANO</div>
+  <div class="brand-sub">MINAS</div>
+  <div class="hud">
+    <div>Jugador<br><b id="name">—</b></div>
+    <div style="text-align:center">Multiplicador<br><b id="mul">x1.00</b></div>
+    <div style="text-align:right">Saldo<br><b id="balance">—</b></div>
+  </div>
+  <div class="g" id="g"></div>
+  <div class="msg" id="msg">Elige apuesta y minas.</div>
+  <div class="error" id="err"></div>
+
+  <div id="setup" class="panel">
+    <div class="row">
+      <input type="number" id="bet" min="1" placeholder="Apuesta">
+      <select id="mines">
+        <option value="1">1 mina</option><option value="3" selected>3 minas</option>
+        <option value="5">5 minas</option><option value="10">10 minas</option><option value="15">15 minas</option>
+      </select>
+      <button id="go">Empezar</button>
+    </div>
+  </div>
+  <div id="play" class="controls" style="display:none"><button id="cash" style="width:100%" disabled>💰 Cobrar</button></div>
+  <div id="again" class="controls" style="display:none"><button id="re" style="width:100%">Otra ronda</button></div>
+  <a class="lobby-link" href="index.html">← Volver a la mesa principal</a>
+</div>
+
+<script>
+var tg = window.Telegram.WebApp; tg.ready(); tg.expand();
+var initData = tg.initData, N = 25;
+var $ = function(i){ return document.getElementById(i); };
+
+function api(path, body){
+  return fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(Object.assign({initData:initData}, body||{}))})
+    .then(function(r){ return r.json(); });
+}
+function say(t, c){ $('msg').textContent = t; $('msg').className = 'msg' + (c?' '+c:''); }
+function money(n){ return '$' + Math.round(n); }
+
+function build(){
+  var g = $('g'); g.innerHTML = '';
+  for(var i=0;i<N;i++){
+    var b = document.createElement('button');
+    b.className = 'c'; b.disabled = true; b.dataset.i = i;
+    b.addEventListener('click', pick);
+    g.appendChild(b);
+  }
+}
+function tiles(){ return document.querySelectorAll('.c'); }
+function setActive(on){ tiles().forEach(function(c){ c.disabled = !on || !!c.textContent; }); }
+
+function applyState(s){
+  build();
+  s.revealed.forEach(function(i){ var c = tiles()[i]; c.textContent = '💎'; c.classList.add('ok'); });
+  setActive(true);
+  $('mul').textContent = 'x' + s.mult.toFixed(2);
+  $('cash').disabled = s.revealed.length === 0;
+  $('setup').style.display = 'none'; $('play').style.display = 'flex'; $('again').style.display = 'none';
+  say('Destapa una casilla.');
+}
+
+function showEnd(bombs, hit){
+  setActive(false);
+  tiles().forEach(function(c){
+    var i = +c.dataset.i;
+    if(!c.textContent){
+      var isBomb = bombs.indexOf(i) > -1;
+      c.textContent = isBomb ? '💣' : '💎';
+      c.classList.add('dim', isBomb ? 'bomb' : 'ok');
+    }
+  });
+  if(hit !== undefined){ var h = tiles()[hit]; h.textContent = '💣'; h.classList.remove('dim'); h.classList.add('bomb'); }
+  $('play').style.display = 'none'; $('again').style.display = 'flex';
+}
+
+function pick(e){
+  var c = e.currentTarget, i = +c.dataset.i;
+  setActive(false);
+  api('/api/minas/reveal', {index:i}).then(function(d){
+    if(d.error){ $('err').textContent = d.error; setActive(true); return; }
+    $('balance').textContent = money(d.balance !== undefined ? d.balance : $('balance').dataset.v);
+    if(d.status === 'lose'){ showEnd(d.bombs, i); say('¡Mina! Perdiste tu apuesta.', 'lose'); return; }
+    c.textContent = '💎'; c.classList.add('ok');
+    if(d.status === 'clear'){ showEnd(d.bombs); say('¡Limpiaste el tablero! +' + money(d.payout), 'win'); return; }
+    $('mul').textContent = 'x' + d.mult.toFixed(2);
+    $('cash').disabled = false; setActive(true);
+    say('Seguro. ¿Cobras o sigues?');
+  });
+}
+
+$('go').addEventListener('click', function(){
+  $('err').textContent = '';
+  var bet = parseInt($('bet').value, 10);
+  if(!bet || bet <= 0){ $('err').textContent = 'Ingresa una apuesta válida.'; return; }
+  api('/api/minas/start', {bet:bet, mines:parseInt($('mines').value,10)}).then(function(d){
+    if(d.error){ $('err').textContent = d.error; return; }
+    $('balance').textContent = money(d.balance); $('balance').dataset.v = d.balance;
+    applyState(d);
+  });
+});
+
+$('cash').addEventListener('click', function(){
+  api('/api/minas/cashout').then(function(d){
+    if(d.error){ $('err').textContent = d.error; return; }
+    $('balance').textContent = money(d.balance);
+    showEnd(d.bombs);
+    say('¡Cobraste! x' + d.mult.toFixed(2) + ' → +' + money(d.payout), 'win');
+  });
+});
+
+$('re').addEventListener('click', function(){
+  build(); $('mul').textContent = 'x1.00'; $('bet').value = '';
+  $('setup').style.display = 'block'; $('again').style.display = 'none';
+  say('Elige apuesta y minas.');
+});
+
+api('/api/me').then(function(d){
+  if(d.error){ $('err').textContent = d.error; return; }
+  $('name').textContent = d.name; $('balance').textContent = money(d.balance);
+  return api('/api/minas/state');
+}).then(function(s){ if(s && s.active) applyState(s); });
+
+build();
+</script>
+</body>
+</html>
