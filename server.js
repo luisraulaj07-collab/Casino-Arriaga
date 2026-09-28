@@ -4,6 +4,7 @@ const path = require('path');
 const { getOrCreateUser, getUser, listUsers, applyDelta } = require('./db');
 const { verifyInitData } = require('./telegramAuth');
 const pokerLogic = require('./pokerLogic');
+const minasLogic = require('./minas');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
@@ -278,7 +279,6 @@ app.post('/api/poker/deal', requireTelegramUser, async function (req, res) {
       return res.status(400).json({ error: 'Saldo insuficiente.' });
     }
 
-    // Descontar la apuesta inicial usando applyDelta
     var newBalance = await applyDelta(req.tgUser.id, -betAmount, 'poker', 'Apuesta Video Póker');
 
     var deck = pokerLogic.freshDeck();
@@ -324,7 +324,6 @@ app.post('/api/poker/draw', requireTelegramUser, async function (req, res) {
 
     var finalBalance;
     if (winnings > 0) {
-      // Sumar ganancia neta o total ganado según tu lógica (aquí sumamos el premio total obtenido)
       finalBalance = await applyDelta(req.tgUser.id, winnings, 'poker', 'Premio Video Póker (' + resultType + ')');
     } else {
       finalBalance = (await getUser(req.tgUser.id)).balance;
@@ -339,6 +338,104 @@ app.post('/api/poker/draw', requireTelegramUser, async function (req, res) {
       winnings: winnings,
       balance: finalBalance
     });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- MINAS ----------
+const minasSessions = {}; // telegram_id -> estado de la partida activa de minas
+
+app.post('/api/minas/state', requireTelegramUser, async function (req, res) {
+  try {
+    var session = minasSessions[req.tgUser.id];
+    if (!session) return res.json({ active: false });
+    res.json(Object.assign({ active: true }, session.publicState()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/minas/start', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var bet = parseInt(req.body.bet, 10);
+    var minesCount = parseInt(req.body.mines, 10);
+
+    if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+    if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
+    if (minasLogic.ALLOWED_MINES.indexOf(minesCount) === -1) return res.status(400).json({ error: 'Cantidad de minas inválida.' });
+
+    // Descontar la apuesta de inmediato
+    var newBalance = await applyDelta(req.tgUser.id, -bet, 'minas', 'Apuesta inicial de Minas');
+
+    var bombs = minasLogic.pickBombs(minesCount);
+    var session = {
+      bet: bet,
+      minesCount: minesCount,
+      bombs: bombs,
+      revealed: [],
+      mult: 1,
+      publicState: function() {
+        return { revealed: this.revealed, mult: this.mult, bet: this.bet, minesCount: this.minesCount };
+      }
+    };
+    minasSessions[req.tgUser.id] = session;
+
+    res.json(Object.assign(session.publicState(), { balance: newBalance }));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/minas/reveal', requireTelegramUser, async function (req, res) {
+  try {
+    var session = minasSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una partida activa.' });
+    var index = parseInt(req.body.index, 10);
+    if (isNaN(index) || index < 0 || index >= minasLogic.N) return res.status(400).json({ error: 'Casilla inválida.' });
+    if (session.revealed.indexOf(index) !== -1) return res.status(400).json({ error: 'Casilla ya destapada.' });
+
+    // Si choca con una mina
+    if (session.bombs.indexOf(index) !== -1) {
+      var bombs = session.bombs;
+      delete minasSessions[req.tgUser.id];
+      var u = await getUser(req.tgUser.id);
+      return res.json({ status: 'lose', bombs: bombs, balance: u.balance });
+    }
+
+    session.revealed.push(index);
+    var k = session.revealed.length;
+    session.mult = minasLogic.multiplier(k, session.minesCount);
+
+    // Si limpia todo el tablero de golpe
+    if (k === minasLogic.N - session.minesCount) {
+      var payout = Math.floor(session.bet * session.mult);
+      var newBalance = await applyDelta(req.tgUser.id, payout, 'minas', 'Tablero limpiado en Minas');
+      var bombs = session.bombs;
+      delete minasSessions[req.tgUser.id];
+      return res.json({ status: 'clear', mult: session.mult, payout: payout, bombs: bombs, balance: newBalance });
+    }
+
+    var u = await getUser(req.tgUser.id);
+    res.json({ status: 'playing', mult: session.mult, balance: u.balance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/minas/cashout', requireTelegramUser, async function (req, res) {
+  try {
+    var session = minasSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una partida activa.' });
+    if (session.revealed.length === 0) return res.status(400).json({ error: 'Debes destapar al menos una casilla.' });
+
+    var payout = Math.floor(session.bet * session.mult);
+    var newBalance = await applyDelta(req.tgUser.id, payout, 'minas', 'Cobro exitoso en Minas (x' + session.mult.toFixed(2) + ')');
+    var bombs = session.bombs;
+    delete minasSessions[req.tgUser.id];
+
+    res.json({ mult: session.mult, payout: payout, bombs: bombs, balance: newBalance });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
