@@ -17,9 +17,18 @@ function freshDeck() {
 }
 
 function probGuess(deck, currentVal, guess) {
-  var higher = 0, lower = 0;
-  deck.forEach(function (c) { if (c.val > currentVal) higher++; else if (c.val < currentVal) lower++; });
-  var favorable = guess === 'higher' ? higher : lower;
+  var higher = 0, lower = 0, equal = 0;
+  deck.forEach(function (c) { 
+    if (c.val > currentVal) higher++; 
+    else if (c.val < currentVal) lower++; 
+    else if (c.val === currentVal) equal++;
+  });
+  
+  var favorable = 0;
+  if (guess === 'higher') favorable = higher;
+  else if (guess === 'lower') favorable = lower;
+  else if (guess === 'equal') favorable = equal;
+
   return deck.length > 0 ? favorable / deck.length : 0;
 }
 
