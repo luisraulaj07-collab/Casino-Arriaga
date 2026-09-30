@@ -5,6 +5,7 @@ const { getOrCreateUser, getUser, listUsers, applyDelta } = require('./db');
 const { verifyInitData } = require('./telegramAuth');
 const pokerLogic = require('./pokerLogic');
 const minasLogic = require('./minas');
+const hiloLogic = require('./hilo');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
@@ -436,6 +437,121 @@ app.post('/api/minas/cashout', requireTelegramUser, async function (req, res) {
     delete minasSessions[req.tgUser.id];
 
     res.json({ mult: session.mult, payout: payout, bombs: bombs, balance: newBalance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- HI-LO ----------
+const hiloSessions = {}; // telegram_id -> estado de la partida de hi-lo
+
+app.post('/api/hilo/state', requireTelegramUser, async function (req, res) {
+  try {
+    var session = hiloSessions[req.tgUser.id];
+    if (!session) return res.json({ active: false });
+    res.json(Object.assign({ active: true }, session.publicState()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/hilo/start', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var bet = parseInt(req.body.bet, 10);
+    if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+    if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
+
+    var newBalance = await applyDelta(req.tgUser.id, -bet, 'hilo', 'Apuesta inicial Hi-Lo');
+    var deck = hiloLogic.freshDeck();
+    var current = deck.pop();
+
+    var session = {
+      bet: bet,
+      deck: deck,
+      current: current,
+      rounds: 0,
+      pCum: 1,
+      publicState: function() {
+        var pHigh = hiloLogic.probGuess(this.deck, this.current.val, 'higher');
+        var pLow = hiloLogic.probGuess(this.deck, this.current.val, 'lower');
+        var multH = pHigh > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pHigh) : null;
+        var multL = pLow > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pLow) : null;
+        var cashoutMult = this.rounds > 0 ? (this.pCum > 0 ? hiloLogic.TARGET_RTP / this.pCum : 1) : 0;
+        return {
+          current: this.current,
+          rounds: this.rounds,
+          higherGain: multH ? Math.floor(this.bet * multH) - this.bet : null,
+          lowerGain: multL ? Math.floor(this.bet * multL) - this.bet : null,
+          cashoutGain: Math.floor(this.bet * cashoutMult)
+        };
+      }
+    };
+    hiloSessions[req.tgUser.id] = session;
+
+    res.json(Object.assign(session.publicState(), { balance: newBalance }));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/hilo/guess', requireTelegramUser, async function (req, res) {
+  try {
+    var session = hiloSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una partida de Hi-Lo activa.' });
+    var guess = req.body.guess;
+    if (guess !== 'higher' && guess !== 'lower') return res.status(400).json({ error: 'Adivinanza inválida.' });
+
+    if (session.deck.length === 0) {
+      delete hiloSessions[req.tgUser.id];
+      var u = await getUser(req.tgUser.id);
+      return res.json({ status: 'autocash', balance: u.balance, payout: session.bet });
+    }
+
+    var nextCard = session.deck.pop();
+    var pRound = hiloLogic.probGuess(session.deck.concat([nextCard]), session.current.val, guess);
+    
+    var isWin = false;
+    if (guess === 'higher') isWin = nextCard.val > session.current.val;
+    else if (guess === 'lower') isWin = nextCard.val < session.current.val;
+
+    if (!isWin) {
+      delete hiloSessions[req.tgUser.id];
+      var u = await getUser(req.tgUser.id);
+      return res.json({ status: 'lose', nextCard: nextCard, balance: u.balance });
+    }
+
+    session.rounds++;
+    session.pCum *= pRound;
+    session.current = nextCard;
+
+    if (session.deck.length === 0) {
+      var mult = hiloLogic.TARGET_RTP / session.pCum;
+      var payout = Math.floor(session.bet * mult);
+      var newBalance = await applyDelta(req.tgUser.id, payout, 'hilo', 'Mazo terminado en Hi-Lo');
+      delete hiloSessions[req.tgUser.id];
+      return res.json({ status: 'autocash', nextCard: nextCard, balance: newBalance, payout: payout });
+    }
+
+    var u = await getUser(req.tgUser.id);
+    res.json(Object.assign({ status: 'win', nextCard: nextCard, balance: u.balance }, session.publicState()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/hilo/cashout', requireTelegramUser, async function (req, res) {
+  try {
+    var session = hiloSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una partida de Hi-Lo activa.' });
+    if (session.rounds === 0) return res.status(400).json({ error: 'Debes acertar al menos una vez para cobrar.' });
+
+    var mult = hiloLogic.TARGET_RTP / session.pCum;
+    var payout = Math.floor(session.bet * mult);
+    var newBalance = await applyDelta(req.tgUser.id, payout, 'hilo', 'Cobro exitoso en Hi-Lo');
+    delete hiloSessions[req.tgUser.id];
+
+    res.json({ payout: payout, balance: newBalance });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
