@@ -475,14 +475,19 @@ app.post('/api/hilo/start', requireTelegramUser, async function (req, res) {
       publicState: function() {
         var pHigh = hiloLogic.probGuess(this.deck, this.current.val, 'higher');
         var pLow = hiloLogic.probGuess(this.deck, this.current.val, 'lower');
+        var pEqual = hiloLogic.probGuess(this.deck, this.current.val, 'equal');
+
         var multH = pHigh > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pHigh) : null;
         var multL = pLow > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pLow) : null;
+        var multE = pEqual > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pEqual) : null;
+
         var cashoutMult = this.rounds > 0 ? (this.pCum > 0 ? hiloLogic.TARGET_RTP / this.pCum : 1) : 0;
         return {
           current: this.current,
           rounds: this.rounds,
           higherGain: multH ? Math.floor(this.bet * multH) - this.bet : null,
           lowerGain: multL ? Math.floor(this.bet * multL) - this.bet : null,
+          equalGain: multE ? Math.floor(this.bet * multE) - this.bet : null,
           cashoutGain: Math.floor(this.bet * cashoutMult)
         };
       }
@@ -500,7 +505,9 @@ app.post('/api/hilo/guess', requireTelegramUser, async function (req, res) {
     var session = hiloSessions[req.tgUser.id];
     if (!session) return res.status(400).json({ error: 'No hay una partida de Hi-Lo activa.' });
     var guess = req.body.guess;
-    if (guess !== 'higher' && guess !== 'lower') return res.status(400).json({ error: 'Adivinanza inválida.' });
+    if (guess !== 'higher' && guess !== 'lower' && guess !== 'equal') {
+      return res.status(400).json({ error: 'Adivinanza inválida.' });
+    }
 
     if (session.deck.length === 0) {
       delete hiloSessions[req.tgUser.id];
@@ -514,6 +521,7 @@ app.post('/api/hilo/guess', requireTelegramUser, async function (req, res) {
     var isWin = false;
     if (guess === 'higher') isWin = nextCard.val > session.current.val;
     else if (guess === 'lower') isWin = nextCard.val < session.current.val;
+    else if (guess === 'equal') isWin = nextCard.val === session.current.val;
 
     if (!isWin) {
       delete hiloSessions[req.tgUser.id];
