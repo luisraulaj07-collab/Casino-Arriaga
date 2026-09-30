@@ -3,9 +3,9 @@ const express = require('express');
 const path = require('path');
 const { getOrCreateUser, getUser, listUsers, applyDelta } = require('./db');
 const { verifyInitData } = require('./telegramAuth');
-const pokerLogic = require('./pokerLogic');
-const minasLogic = require('./minas');
-const hiloLogic = require('./hilo');
+const minas = require('./minas');
+const hilo = require('./hilo');
+const { freshDeck: vpFreshDeck, evalHand: vpEvalHand, PAY_TABLE: VP_PAY_TABLE } = require('./videopoker');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
@@ -19,11 +19,6 @@ if (!BOT_TOKEN) {
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-
-// Servir la página principal del casino
-app.get('/', function (req, res) {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
 
 // ---------- Autenticación de cada request del jugador ----------
 function requireTelegramUser(req, res, next) {
@@ -40,38 +35,29 @@ function requireAdmin(req, res, next) {
 }
 
 // ---------- Perfil / saldo ----------
-app.post('/api/me', requireTelegramUser, async function (req, res) {
-  try {
-    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-    res.json({ id: u.telegram_id, name: u.first_name || u.username || ('Jugador ' + u.telegram_id), balance: u.balance });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+app.post('/api/me', requireTelegramUser, function (req, res) {
+  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+  res.json({ id: u.telegram_id, name: u.first_name || u.username || ('Jugador ' + u.telegram_id), balance: u.balance });
 });
 
 // ---------- Panel del dealer ----------
-app.post('/api/admin/users', requireAdmin, async function (req, res) {
-  try {
-    var users = await listUsers();
-    res.json(users);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+app.post('/api/admin/users', requireAdmin, function (req, res) {
+  res.json(listUsers());
 });
 
-app.post('/api/admin/recharge', requireAdmin, async function (req, res) {
+app.post('/api/admin/recharge', requireAdmin, function (req, res) {
   var telegramId = parseInt(req.body.telegramId, 10);
   var amount = parseInt(req.body.amount, 10);
   if (!telegramId || !amount) return res.status(400).json({ error: 'Faltan datos.' });
   try {
-    var newBalance = await applyDelta(telegramId, amount, 'recarga', 'Recarga autorizada por el dealer');
+    var newBalance = applyDelta(telegramId, amount, 'recarga', 'Recarga autorizada por el dealer');
     res.json({ ok: true, balance: newBalance });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
 });
 
-// ---------- BLACKJACK ----------
+// ---------- BLACKJACK (servidor lleva el mazo y las manos) ----------
 const suits = [{ s: '♠', red: false }, { s: '♣', red: false }, { s: '♥', red: true }, { s: '♦', red: true }];
 const ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
 const blackjackSessions = {}; // telegram_id -> { deck, playerHand, dealerHand, bet }
@@ -104,124 +90,73 @@ function publicState(session, revealDealer) {
   };
 }
 
-app.post('/api/blackjack/deal', requireTelegramUser, async function (req, res) {
-  try {
-    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-    var bet = parseInt(req.body.bet, 10);
-    if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
-    if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
+app.post('/api/blackjack/deal', requireTelegramUser, function (req, res) {
+  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+  var bet = parseInt(req.body.bet, 10);
+  if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+  if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
 
-    var deck = freshDeck();
-    var session = { deck: deck, playerHand: [deck.pop(), deck.pop()], dealerHand: [deck.pop(), deck.pop()], bet: bet };
-    blackjackSessions[req.tgUser.id] = session;
+  var deck = freshDeck();
+  var session = { deck: deck, playerHand: [deck.pop(), deck.pop()], dealerHand: [deck.pop(), deck.pop()], bet: bet };
+  blackjackSessions[req.tgUser.id] = session;
 
-    if (isBlackjack(session.playerHand)) {
-      var dealerBJ = isBlackjack(session.dealerHand);
-      var delta = dealerBJ ? 0 : Math.floor(bet * 1.5);
-      var newBalance = u.balance;
-      if (!dealerBJ) {
-        newBalance = await applyDelta(req.tgUser.id, delta, 'blackjack', 'Blackjack — paga 3 a 2');
-      }
-      delete blackjackSessions[req.tgUser.id];
-      return res.json({ status: dealerBJ ? 'push' : 'blackjack', state: publicState(session, true), balance: newBalance, delta: delta });
-    }
-
-    res.json({ status: 'playing', state: publicState(session, false), balance: u.balance });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+  if (isBlackjack(session.playerHand)) {
+    var dealerBJ = isBlackjack(session.dealerHand);
+    var delta = dealerBJ ? 0 : Math.floor(bet * 1.5);
+    var newBalance = applyDelta(req.tgUser.id, delta, 'blackjack', dealerBJ ? 'Empate — ambos blackjack' : 'Blackjack — paga 3 a 2');
+    delete blackjackSessions[req.tgUser.id];
+    return res.json({ status: dealerBJ ? 'push' : 'blackjack', state: publicState(session, true), balance: newBalance, delta: delta });
   }
+  res.json({ status: 'playing', state: publicState(session, false), balance: u.balance });
 });
 
-app.post('/api/blackjack/hit', requireTelegramUser, async function (req, res) {
-  try {
-    var session = blackjackSessions[req.tgUser.id];
-    if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
-    session.playerHand.push(session.deck.pop());
-    var total = handTotal(session.playerHand);
-    
-    if (total > 21) {
-      var newBalance = await applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Se pasó de 21');
-      delete blackjackSessions[req.tgUser.id];
-      return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
-    }
-
-    var currentUser = await getUser(req.tgUser.id);
-    res.json({ status: 'playing', state: publicState(session, false), balance: currentUser.balance });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+app.post('/api/blackjack/hit', requireTelegramUser, function (req, res) {
+  var session = blackjackSessions[req.tgUser.id];
+  if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
+  session.playerHand.push(session.deck.pop());
+  var total = handTotal(session.playerHand);
+  if (total > 21) {
+    var newBalance = applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Se pasó de 21');
+    delete blackjackSessions[req.tgUser.id];
+    return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
   }
+  res.json({ status: 'playing', state: publicState(session, false), balance: getUser(req.tgUser.id).balance });
 });
 
-async function dealerPlayAndResolve(telegramId, session) {
-  var p = handTotal(session.playerHand);
-
-  if (p > 21) {
-    var newBalance = await applyDelta(telegramId, -session.bet, 'blackjack', 'Se pasó de 21');
-    delete blackjackSessions[telegramId];
-    return { status: 'lose', balance: newBalance, delta: -session.bet };
-  }
-
+function dealerPlayAndResolve(telegramId, session) {
   while (handTotal(session.dealerHand) < 17) session.dealerHand.push(session.deck.pop());
-  var d = handTotal(session.dealerHand);
-  var status, delta = 0;
-
+  var p = handTotal(session.playerHand), d = handTotal(session.dealerHand);
+  var status, delta;
   if (d > 21 || p > d) { status = 'win'; delta = session.bet; }
   else if (p < d) { status = 'lose'; delta = -session.bet; }
   else { status = 'push'; delta = 0; }
-
-  var newBalance = await applyDelta(telegramId, delta, 'blackjack', 'Resultado: ' + status);
+  var newBalance = applyDelta(telegramId, delta, 'blackjack', 'Resultado: ' + status);
   delete blackjackSessions[telegramId];
   return { status: status, balance: newBalance, delta: delta };
 }
 
-app.post('/api/blackjack/stand', requireTelegramUser, async function (req, res) {
-  try {
-    var session = blackjackSessions[req.tgUser.id];
-    if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
-    var result = await dealerPlayAndResolve(req.tgUser.id, session);
-    res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+app.post('/api/blackjack/stand', requireTelegramUser, function (req, res) {
+  var session = blackjackSessions[req.tgUser.id];
+  if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
+  var result = dealerPlayAndResolve(req.tgUser.id, session);
+  res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
 });
 
-app.post('/api/blackjack/double', requireTelegramUser, async function (req, res) {
-  try {
-    var session = blackjackSessions[req.tgUser.id];
-    if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
-    var u = await getUser(req.tgUser.id);
-    
-    if (session.bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente para doblar.' });
-    
-    session.bet = session.bet * 2;
-    session.playerHand.push(session.deck.pop());
-    
-    var total = handTotal(session.playerHand);
-    if (total > 21) {
-      var newBalance = await applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Doblar y se pasó de 21');
-      delete blackjackSessions[req.tgUser.id];
-      return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
-    }
-    
-    var result = await dealerPlayAndResolve(req.tgUser.id, session);
-    res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/blackjack/abandon', requireTelegramUser, async function (req, res) {
-  try {
-    var session = blackjackSessions[req.tgUser.id];
-    if (!session) return res.json({ ok: true, active: false });
-
-    var newBalance = await applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Abandonó la partida con mano activa');
+app.post('/api/blackjack/double', requireTelegramUser, function (req, res) {
+  var session = blackjackSessions[req.tgUser.id];
+  if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
+  var u = getUser(req.tgUser.id);
+  if (session.bet * 2 > u.balance + session.bet) return res.status(400).json({ error: 'Saldo insuficiente para doblar.' });
+  session.bet = session.bet * 2;
+  session.playerHand.push(session.deck.pop());
+  var total = handTotal(session.playerHand);
+  if (total > 21) {
+    var newBalance = applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Se pasó de 21 al doblar');
     delete blackjackSessions[req.tgUser.id];
-    
-    res.json({ ok: true, active: true, balance: newBalance });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
   }
+  var result = dealerPlayAndResolve(req.tgUser.id, session);
+  res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
 });
 
 // ---------- RULETA ----------
@@ -238,331 +173,213 @@ function spinWheel() {
   return order[order.length - 1];
 }
 
-app.post('/api/roulette/spin', requireTelegramUser, async function (req, res) {
-  try {
-    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-    var betType = req.body.betType;
-    var number = parseInt(req.body.number, 10);
-    var amount = parseInt(req.body.amount, 10);
-    if (!amount || amount <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
-    if (amount > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
-    if (betType === 'numero' && (isNaN(number) || number < 0 || number > 36)) return res.status(400).json({ error: 'Número inválido.' });
+app.post('/api/roulette/spin', requireTelegramUser, function (req, res) {
+  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+  var betType = req.body.betType;
+  var number = parseInt(req.body.number, 10);
+  var amount = parseInt(req.body.amount, 10);
+  if (!amount || amount <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+  if (amount > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
+  if (betType === 'numero' && (isNaN(number) || number < 0 || number > 36)) return res.status(400).json({ error: 'Número inválido.' });
 
-    var winNumber = spinWheel();
-    var c = colorOf(winNumber);
-    var win = false, mult = 0;
-    if (betType === 'rojo') { win = c === 'red'; mult = 2; }
-    else if (betType === 'negro') { win = c === 'black'; mult = 2; }
-    else if (betType === 'numero') { win = number === winNumber; mult = (number === 0) ? 10 : 5; }
-    else return res.status(400).json({ error: 'Tipo de apuesta inválido.' });
+  var winNumber = spinWheel();
+  var c = colorOf(winNumber);
+  var win = false, mult = 0;
+  if (betType === 'rojo') { win = c === 'red'; mult = 2; }
+  else if (betType === 'negro') { win = c === 'black'; mult = 2; }
+  else if (betType === 'numero') { win = number === winNumber; mult = (number === 0) ? 10 : 5; }
+  else return res.status(400).json({ error: 'Tipo de apuesta inválido.' });
 
-    var delta = win ? amount * (mult - 1) : -amount;
-    var newBalance = await applyDelta(req.tgUser.id, delta, 'ruleta', 'Salió ' + winNumber + ' (' + c + ')');
+  var delta = win ? amount * (mult - 1) : -amount;
+  var newBalance = applyDelta(req.tgUser.id, delta, 'ruleta', 'Salió ' + winNumber + ' (' + c + ')');
 
-    res.json({ winNumber: winNumber, color: c, win: win, delta: delta, balance: newBalance });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  res.json({ winNumber: winNumber, color: c, win: win, delta: delta, balance: newBalance });
 });
 
 // ---------- VIDEO PÓKER (Jacks or Better) ----------
-const activePokerGames = {};
+const vpSessions = {}; // telegram_id -> { deck, hand, bet }
 
-app.post('/api/poker/deal', requireTelegramUser, async function (req, res) {
-  try {
-    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-    var betAmount = parseInt(req.body.bet, 10);
+app.post('/api/videopoker/deal', requireTelegramUser, function (req, res) {
+  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+  var bet = parseInt(req.body.bet, 10);
+  if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+  if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
 
-    if (!betAmount || betAmount <= 0) {
-      return res.status(400).json({ error: 'Apuesta inválida.' });
-    }
-    if (betAmount > u.balance) {
-      return res.status(400).json({ error: 'Saldo insuficiente.' });
-    }
+  var deck = vpFreshDeck();
+  var hand = [deck.pop(), deck.pop(), deck.pop(), deck.pop(), deck.pop()];
+  vpSessions[req.tgUser.id] = { deck: deck, hand: hand, bet: bet };
 
-    var newBalance = await applyDelta(req.tgUser.id, -betAmount, 'poker', 'Apuesta Video Póker');
-
-    var deck = pokerLogic.freshDeck();
-    var hand = deck.splice(0, 5);
-
-    activePokerGames[req.tgUser.id] = {
-      deck: deck,
-      hand: hand,
-      bet: betAmount
-    };
-
-    res.json({
-      hand: hand,
-      balance: newBalance
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  res.json({ hand: hand, balance: u.balance });
 });
 
-app.post('/api/poker/draw', requireTelegramUser, async function (req, res) {
-  try {
-    var session = activePokerGames[req.tgUser.id];
-    if (!session) {
-      return res.status(400).json({ error: 'No hay una partida de póker activa.' });
-    }
+app.post('/api/videopoker/draw', requireTelegramUser, function (req, res) {
+  var session = vpSessions[req.tgUser.id];
+  if (!session) return res.status(400).json({ error: 'No hay una mano activa. Reparte primero.' });
+  var holds = req.body.holds; // array de 5 booleans
+  if (!Array.isArray(holds) || holds.length !== 5) return res.status(400).json({ error: 'Selección de cartas inválida.' });
 
-    var hand = session.hand;
-    var deck = session.deck;
-    var indexesToHold = req.body.heldIndexes || [];
-
-    for (let i = 0; i < 5; i++) {
-      if (!indexesToHold.includes(i)) {
-        if (deck.length > 0) {
-          hand[i] = deck.pop();
-        }
-      }
-    }
-
-    var resultType = pokerLogic.evalHand(hand);
-    var multiplier = pokerLogic.PAY_TABLE[resultType] || 0;
-    var winnings = session.bet * multiplier;
-
-    var finalBalance;
-    if (winnings > 0) {
-      finalBalance = await applyDelta(req.tgUser.id, winnings, 'poker', 'Premio Video Póker (' + resultType + ')');
-    } else {
-      finalBalance = (await getUser(req.tgUser.id)).balance;
-    }
-
-    delete activePokerGames[req.tgUser.id];
-
-    res.json({
-      hand: hand,
-      resultType: resultType,
-      multiplier: multiplier,
-      winnings: winnings,
-      balance: finalBalance
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+  for (var i = 0; i < 5; i++) {
+    if (!holds[i]) session.hand[i] = session.deck.pop();
   }
+
+  var result = vpEvalHand(session.hand);
+  var mult = VP_PAY_TABLE[result];
+  var delta = mult > 0 ? session.bet * mult - session.bet : -session.bet;
+  var newBalance = applyDelta(req.tgUser.id, delta, 'videopoker', 'Resultado: ' + result);
+
+  delete vpSessions[req.tgUser.id];
+  res.json({ hand: session.hand, result: result, mult: mult, delta: delta, balance: newBalance });
 });
 
 // ---------- MINAS ----------
-const minasSessions = {}; // telegram_id -> estado de la partida activa de minas
+const minasSessions = {}; // telegram_id -> { bet, mines, bombs, revealed }
 
-app.post('/api/minas/state', requireTelegramUser, async function (req, res) {
-  try {
-    var session = minasSessions[req.tgUser.id];
-    if (!session) return res.json({ active: false });
-    res.json(Object.assign({ active: true }, session.publicState()));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+function minasView(s) {
+  var k = s.revealed.length;
+  return {
+    revealed: s.revealed, mines: s.mines, bet: s.bet,
+    mult: minas.multiplier(k, s.mines),
+    nextMult: k < minas.N - s.mines ? minas.multiplier(k + 1, s.mines) : null
+  };
+}
+
+app.post('/api/minas/state', requireTelegramUser, function (req, res) {
+  var s = minasSessions[req.tgUser.id];
+  res.json(s ? { active: true, ...minasView(s) } : { active: false });
 });
 
-app.post('/api/minas/start', requireTelegramUser, async function (req, res) {
-  try {
-    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-    var bet = parseInt(req.body.bet, 10);
-    var minesCount = parseInt(req.body.mines, 10);
+app.post('/api/minas/start', requireTelegramUser, function (req, res) {
+  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+  if (minasSessions[req.tgUser.id]) return res.status(400).json({ error: 'Ya tienes una ronda activa.' });
+  var bet = parseInt(req.body.bet, 10);
+  var mines = parseInt(req.body.mines, 10);
+  if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+  if (minas.ALLOWED_MINES.indexOf(mines) === -1) return res.status(400).json({ error: 'Cantidad de minas inválida.' });
+  if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
 
-    if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
-    if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
-    if (minasLogic.ALLOWED_MINES.indexOf(minesCount) === -1) return res.status(400).json({ error: 'Cantidad de minas inválida.' });
-
-    // Descontar la apuesta de inmediato
-    var newBalance = await applyDelta(req.tgUser.id, -bet, 'minas', 'Apuesta inicial de Minas');
-
-    var bombs = minasLogic.pickBombs(minesCount);
-    var session = {
-      bet: bet,
-      minesCount: minesCount,
-      bombs: bombs,
-      revealed: [],
-      mult: 1,
-      publicState: function() {
-        return { revealed: this.revealed, mult: this.mult, bet: this.bet, minesCount: this.minesCount };
-      }
-    };
-    minasSessions[req.tgUser.id] = session;
-
-    res.json(Object.assign(session.publicState(), { balance: newBalance }));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  // La apuesta se descuenta al empezar: si abandonan la ronda, la pierden.
+  var balance = applyDelta(req.tgUser.id, -bet, 'minas', 'Apuesta con ' + mines + ' minas');
+  var s = { bet: bet, mines: mines, bombs: minas.pickBombs(mines), revealed: [] };
+  minasSessions[req.tgUser.id] = s;
+  res.json({ balance: balance, ...minasView(s) });
 });
 
-app.post('/api/minas/reveal', requireTelegramUser, async function (req, res) {
-  try {
-    var session = minasSessions[req.tgUser.id];
-    if (!session) return res.status(400).json({ error: 'No hay una partida activa.' });
-    var index = parseInt(req.body.index, 10);
-    if (isNaN(index) || index < 0 || index >= minasLogic.N) return res.status(400).json({ error: 'Casilla inválida.' });
-    if (session.revealed.indexOf(index) !== -1) return res.status(400).json({ error: 'Casilla ya destapada.' });
+app.post('/api/minas/reveal', requireTelegramUser, function (req, res) {
+  var s = minasSessions[req.tgUser.id];
+  if (!s) return res.status(400).json({ error: 'No hay una ronda activa.' });
+  var i = parseInt(req.body.index, 10);
+  if (isNaN(i) || i < 0 || i >= minas.N || s.revealed.indexOf(i) !== -1) return res.status(400).json({ error: 'Casilla inválida.' });
 
-    // Si choca con una mina
-    if (session.bombs.indexOf(index) !== -1) {
-      var bombs = session.bombs;
-      delete minasSessions[req.tgUser.id];
-      var u = await getUser(req.tgUser.id);
-      return res.json({ status: 'lose', bombs: bombs, balance: u.balance });
-    }
-
-    session.revealed.push(index);
-    var k = session.revealed.length;
-    session.mult = minasLogic.multiplier(k, session.minesCount);
-
-    // Si limpia todo el tablero de golpe
-    if (k === minasLogic.N - session.minesCount) {
-      var payout = Math.floor(session.bet * session.mult);
-      var newBalance = await applyDelta(req.tgUser.id, payout, 'minas', 'Tablero limpiado en Minas');
-      var bombs = session.bombs;
-      delete minasSessions[req.tgUser.id];
-      return res.json({ status: 'clear', mult: session.mult, payout: payout, bombs: bombs, balance: newBalance });
-    }
-
-    var u = await getUser(req.tgUser.id);
-    res.json({ status: 'playing', mult: session.mult, balance: u.balance });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/minas/cashout', requireTelegramUser, async function (req, res) {
-  try {
-    var session = minasSessions[req.tgUser.id];
-    if (!session) return res.status(400).json({ error: 'No hay una partida activa.' });
-    if (session.revealed.length === 0) return res.status(400).json({ error: 'Debes destapar al menos una casilla.' });
-
-    var payout = Math.floor(session.bet * session.mult);
-    var newBalance = await applyDelta(req.tgUser.id, payout, 'minas', 'Cobro exitoso en Minas (x' + session.mult.toFixed(2) + ')');
-    var bombs = session.bombs;
+  if (s.bombs.indexOf(i) !== -1) {
     delete minasSessions[req.tgUser.id];
-
-    res.json({ mult: session.mult, payout: payout, bombs: bombs, balance: newBalance });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.json({ status: 'lose', bombs: s.bombs, hit: i, balance: getUser(req.tgUser.id).balance });
   }
+  s.revealed.push(i);
+  if (s.revealed.length === minas.N - s.mines) { // tablero limpio: cobro automático
+    var payout = Math.floor(s.bet * minas.multiplier(s.revealed.length, s.mines));
+    var bal = applyDelta(req.tgUser.id, payout, 'minas', 'Tablero limpio');
+    delete minasSessions[req.tgUser.id];
+    return res.json({ status: 'clear', payout: payout, bombs: s.bombs, balance: bal, revealed: s.revealed });
+  }
+  res.json({ status: 'safe', ...minasView(s) });
+});
+
+app.post('/api/minas/cashout', requireTelegramUser, function (req, res) {
+  var s = minasSessions[req.tgUser.id];
+  if (!s || s.revealed.length === 0) return res.status(400).json({ error: 'Nada que cobrar todavía.' });
+  var mult = minas.multiplier(s.revealed.length, s.mines);
+  var payout = Math.floor(s.bet * mult);
+  var bal = applyDelta(req.tgUser.id, payout, 'minas', 'Cobro x' + mult.toFixed(2));
+  delete minasSessions[req.tgUser.id];
+  res.json({ status: 'cashout', payout: payout, mult: mult, bombs: s.bombs, balance: bal });
 });
 
 // ---------- HI-LO ----------
-const hiloSessions = {}; // telegram_id -> estado de la partida de hi-lo
+const hiloSessions = {}; // telegram_id -> { bet, deck, current, pCum, rounds }
 
-app.post('/api/hilo/state', requireTelegramUser, async function (req, res) {
-  try {
-    var session = hiloSessions[req.tgUser.id];
-    if (!session) return res.json({ active: false });
-    res.json(Object.assign({ active: true }, session.publicState()));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+function hiloMult(deck, currentVal, guess, pCum) {
+  var p = hilo.probGuess(deck, currentVal, guess);
+  if (p <= 0) return 0;
+  return hilo.TARGET_RTP / (pCum * p);
+}
+
+function hiloView(s) {
+  var hMult = hiloMult(s.deck, s.current.val, 'higher', s.pCum);
+  var lMult = hiloMult(s.deck, s.current.val, 'lower', s.pCum);
+  var eMult = hiloMult(s.deck, s.current.val, 'equal', s.pCum);
+  var curPayout = s.rounds > 0 ? Math.floor(s.bet * (hilo.TARGET_RTP / s.pCum)) : 0;
+  return {
+    current: s.current, bet: s.bet, rounds: s.rounds,
+    higherGain: hMult > 0 ? Math.floor(s.bet * hMult) - s.bet : null,
+    lowerGain: lMult > 0 ? Math.floor(s.bet * lMult) - s.bet : null,
+    equalGain: eMult > 0 ? Math.floor(s.bet * eMult) - s.bet : null,
+    cashoutGain: curPayout - s.bet
+  };
+}
+
+app.post('/api/hilo/state', requireTelegramUser, function (req, res) {
+  var s = hiloSessions[req.tgUser.id];
+  res.json(s ? { active: true, ...hiloView(s) } : { active: false });
 });
 
-app.post('/api/hilo/start', requireTelegramUser, async function (req, res) {
-  try {
-    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-    var bet = parseInt(req.body.bet, 10);
-    if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
-    if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
+app.post('/api/hilo/start', requireTelegramUser, function (req, res) {
+  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+  if (hiloSessions[req.tgUser.id]) return res.status(400).json({ error: 'Ya tienes una ronda activa.' });
+  var bet = parseInt(req.body.bet, 10);
+  if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+  if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
 
-    var newBalance = await applyDelta(req.tgUser.id, -bet, 'hilo', 'Apuesta inicial Hi-Lo');
-    var deck = hiloLogic.freshDeck();
-    var current = deck.pop();
-
-    var session = {
-      bet: bet,
-      deck: deck,
-      current: current,
-      rounds: 0,
-      pCum: 1,
-      publicState: function() {
-        var pHigh = hiloLogic.probGuess(this.deck, this.current.val, 'higher');
-        var pLow = hiloLogic.probGuess(this.deck, this.current.val, 'lower');
-        var pEqual = hiloLogic.probGuess(this.deck, this.current.val, 'equal');
-
-        var multH = pHigh > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pHigh) : null;
-        var multL = pLow > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pLow) : null;
-        var multE = pEqual > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pEqual) : null;
-
-        var cashoutMult = this.rounds > 0 ? (this.pCum > 0 ? hiloLogic.TARGET_RTP / this.pCum : 1) : 0;
-        return {
-          current: this.current,
-          rounds: this.rounds,
-          higherGain: multH ? Math.floor(this.bet * multH) - this.bet : null,
-          lowerGain: multL ? Math.floor(this.bet * multL) - this.bet : null,
-          equalGain: multE ? Math.floor(this.bet * multE) - this.bet : null,
-          cashoutGain: Math.floor(this.bet * cashoutMult)
-        };
-      }
-    };
-    hiloSessions[req.tgUser.id] = session;
-
-    res.json(Object.assign(session.publicState(), { balance: newBalance }));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  // Se descuenta al empezar: abandonar a medias cuenta como perder la ronda.
+  var balance = applyDelta(req.tgUser.id, -bet, 'hilo', 'Apuesta Hi-Lo');
+  var deck = hilo.freshDeck();
+  var current = deck.pop();
+  var s = { bet: bet, deck: deck, current: current, pCum: 1, rounds: 0 };
+  hiloSessions[req.tgUser.id] = s;
+  res.json({ balance: balance, ...hiloView(s) });
 });
 
-app.post('/api/hilo/guess', requireTelegramUser, async function (req, res) {
-  try {
-    var session = hiloSessions[req.tgUser.id];
-    if (!session) return res.status(400).json({ error: 'No hay una partida de Hi-Lo activa.' });
-    var guess = req.body.guess;
-    if (guess !== 'higher' && guess !== 'lower' && guess !== 'equal') {
-      return res.status(400).json({ error: 'Adivinanza inválida.' });
-    }
+app.post('/api/hilo/guess', requireTelegramUser, function (req, res) {
+  var s = hiloSessions[req.tgUser.id];
+  if (!s) return res.status(400).json({ error: 'No hay una ronda activa.' });
+  var guess = req.body.guess;
+  if (['higher', 'lower', 'equal'].indexOf(guess) === -1) return res.status(400).json({ error: 'Elige más alta, más baja o empate.' });
 
-    if (session.deck.length === 0) {
-      delete hiloSessions[req.tgUser.id];
-      var u = await getUser(req.tgUser.id);
-      return res.json({ status: 'autocash', balance: u.balance, payout: session.bet });
-    }
+  var pRound = hilo.probGuess(s.deck, s.current.val, guess);
+  if (pRound <= 0) return res.status(400).json({ error: 'Esa opción es imposible con la carta actual.' });
 
-    var nextCard = session.deck.pop();
-    var pRound = hiloLogic.probGuess(session.deck.concat([nextCard]), session.current.val, guess);
-    
-    var isWin = false;
-    if (guess === 'higher') isWin = nextCard.val > session.current.val;
-    else if (guess === 'lower') isWin = nextCard.val < session.current.val;
-    else if (guess === 'equal') isWin = nextCard.val === session.current.val;
+  var idx = Math.floor(Math.random() * s.deck.length);
+  var next = s.deck[idx];
+  s.deck.splice(idx, 1);
+  var win = guess === 'higher' ? next.val > s.current.val
+    : guess === 'lower' ? next.val < s.current.val
+    : next.val === s.current.val;
 
-    if (!isWin) {
-      delete hiloSessions[req.tgUser.id];
-      var u = await getUser(req.tgUser.id);
-      return res.json({ status: 'lose', nextCard: nextCard, balance: u.balance });
-    }
-
-    session.rounds++;
-    session.pCum *= pRound;
-    session.current = nextCard;
-
-    if (session.deck.length === 0) {
-      var mult = hiloLogic.TARGET_RTP / session.pCum;
-      var payout = Math.floor(session.bet * mult);
-      var newBalance = await applyDelta(req.tgUser.id, payout, 'hilo', 'Mazo terminado en Hi-Lo');
-      delete hiloSessions[req.tgUser.id];
-      return res.json({ status: 'autocash', nextCard: nextCard, balance: newBalance, payout: payout });
-    }
-
-    var u = await getUser(req.tgUser.id);
-    res.json(Object.assign({ status: 'win', nextCard: nextCard, balance: u.balance }, session.publicState()));
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/hilo/cashout', requireTelegramUser, async function (req, res) {
-  try {
-    var session = hiloSessions[req.tgUser.id];
-    if (!session) return res.status(400).json({ error: 'No hay una partida de Hi-Lo activa.' });
-    if (session.rounds === 0) return res.status(400).json({ error: 'Debes acertar al menos una vez para cobrar.' });
-
-    var mult = hiloLogic.TARGET_RTP / session.pCum;
-    var payout = Math.floor(session.bet * mult);
-    var newBalance = await applyDelta(req.tgUser.id, payout, 'hilo', 'Cobro exitoso en Hi-Lo');
+  if (!win) {
     delete hiloSessions[req.tgUser.id];
-
-    res.json({ payout: payout, balance: newBalance });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.json({ status: 'lose', nextCard: next, balance: getUser(req.tgUser.id).balance });
   }
+
+  s.pCum *= pRound;
+  s.current = next;
+  s.rounds++;
+
+  if (s.deck.length === 0) { // mazo agotado: se cobra automático
+    var payout = Math.floor(s.bet * (hilo.TARGET_RTP / s.pCum));
+    var bal = applyDelta(req.tgUser.id, payout, 'hilo', 'Mazo agotado');
+    delete hiloSessions[req.tgUser.id];
+    return res.json({ status: 'autocash', nextCard: next, payout: payout, balance: bal });
+  }
+
+  res.json({ status: 'win', nextCard: next, ...hiloView(s) });
+});
+
+app.post('/api/hilo/cashout', requireTelegramUser, function (req, res) {
+  var s = hiloSessions[req.tgUser.id];
+  if (!s || s.rounds === 0) return res.status(400).json({ error: 'Nada que cobrar todavía.' });
+  var payout = Math.floor(s.bet * (hilo.TARGET_RTP / s.pCum));
+  var bal = applyDelta(req.tgUser.id, payout, 'hilo', 'Cobro Hi-Lo');
+  delete hiloSessions[req.tgUser.id];
+  res.json({ status: 'cashout', payout: payout, balance: bal });
 });
 
 app.listen(PORT, function () {
