@@ -1,43 +1,42 @@
-// Lógica de Hi-Lo. El mazo vive solo en el servidor: el navegador nunca sabe
-// qué carta sigue hasta que la pide.
-const RANK_ORDER = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
-const RANK_VAL = {};
-RANK_ORDER.forEach(function (r, i) { RANK_VAL[r] = i + 2; });
-const SUITS = ['♠', '♥', '♦', '♣'];
-const TARGET_RTP = 0.90; // 10% de ventaja para la casa
+const TARGET_RTP = 0.97; // 97% RTP para el jugador (3% de ventaja para la casa)
+
+const suits = [
+  { s: '♠', red: false },
+  { s: '♣', red: false },
+  { s: '♥', red: true },
+  { s: '♦', red: true }
+];
+const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
 
 function freshDeck() {
   var d = [];
-  SUITS.forEach(function (s) { RANK_ORDER.forEach(function (r) { d.push({ rank: r, suit: s, val: RANK_VAL[r] }); }); });
+  suits.forEach(function (su) {
+    ranks.forEach(function (r, idx) {
+      d.push({ rank: r, suit: su.s, red: su.red, val: idx + 2 });
+    });
+  });
   for (var k = d.length - 1; k > 0; k--) {
-    var j = Math.floor(Math.random() * (k + 1));
-    var t = d[k]; d[k] = d[j]; d[j] = t;
+    var r = Math.floor(Math.random() * (k + 1));
+    var t = d[k]; d[k] = d[r]; d[r] = t;
   }
   return d;
 }
 
+// Calcula la probabilidad para 'higher', 'lower' o 'equal'
 function probGuess(deck, currentVal, guess) {
-  var higher = 0, lower = 0, equal = 0;
-  deck.forEach(function (c) { 
-    if (c.val > currentVal) higher++; 
-    else if (c.val < currentVal) lower++; 
-    else if (c.val === currentVal) equal++;
-  });
-  
+  var total = deck.length;
+  if (total === 0) return 0;
   var favorable = 0;
-  if (guess === 'higher') favorable = higher;
-  else if (guess === 'lower') favorable = lower;
-  else if (guess === 'equal') favorable = equal;
-
-  return deck.length > 0 ? favorable / deck.length : 0;
+  deck.forEach(function (c) {
+    if (guess === 'higher' && c.val > currentVal) favorable++;
+    if (guess === 'lower' && c.val < currentVal) favorable++;
+    if (guess === 'equal' && c.val === currentVal) favorable++;
+  });
+  return favorable / total;
 }
 
-// Multiplicador si esta ronda es la que se juega ahora mismo, dado lo que ya
-// se acumuló (pCum = probabilidad conjunta de toda la racha hasta aquí).
-function multIfWin(deck, currentVal, guess, pCum) {
-  var pRound = probGuess(deck, currentVal, guess);
-  if (pRound <= 0) return 0;
-  return TARGET_RTP / (pCum * pRound);
-}
-
-module.exports = { freshDeck: freshDeck, probGuess: probGuess, multIfWin: multIfWin, TARGET_RTP: TARGET_RTP };
+module.exports = {
+  TARGET_RTP: TARGET_RTP,
+  freshDeck: freshDeck,
+  probGuess: probGuess
+};
