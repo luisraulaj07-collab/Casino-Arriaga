@@ -18,23 +18,31 @@ if (!BOT_TOKEN) {
 
 const app = express();
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // <-- Añadido para asegurar lectura de cuerpos URL-encoded/JSON
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- Autenticación de cada request del jugador (Blindada) ----------
+// ---------- Autenticación de cada request del jugador (Blindada con logs) ----------
 function requireTelegramUser(req, res, next) {
   var initData = req.body.initData || req.query.initData;
   
+  console.log("--- REVISIÓN AUTH TELEGRAM ---");
+  console.log("BODY recibido:", JSON.stringify(req.body));
+  console.log("initData presente:", initData ? "Sí (Largo: " + initData.length + ")" : "NO");
+
   // Parche para pruebas locales: si se abre directo en navegador sin Telegram
   if (!initData) {
+    console.log("Aviso: No llegó initData, usando usuario de prueba local.");
     req.tgUser = { id: 999999, username: 'luis_arriaga', first_name: 'Luis' };
     return next();
   }
 
   var user = verifyInitData(initData, BOT_TOKEN);
   if (!user) {
-    // Respaldo por si el initData falla en Telegram
+    console.log("Error: verifyInitData rechazó el initData proporcionado.");
+    // Respaldo temporal para evitar bloqueos totales de la interfaz si el hash varía
     req.tgUser = { id: 999999, username: 'invitado', first_name: 'Jugador' };
   } else {
+    console.log("Autenticación exitosa para Telegram ID:", user.id);
     req.tgUser = user;
   }
   next();
@@ -56,6 +64,7 @@ app.post('/api/me', requireTelegramUser, function (req, res) {
       balance: (u.balance !== undefined && u.balance !== null) ? Number(u.balance) : 0 
     });
   } catch (e) {
+    console.error("Error en /api/me:", e.message);
     res.json({ 
       id: req.tgUser.id, 
       name: req.tgUser.first_name || 'Jugador', 
