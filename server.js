@@ -74,7 +74,7 @@ app.post('/api/admin/recharge', requireAdmin, async function (req, res) {
 // ---------- BLACKJACK ----------
 const suits = [{ s: '♠', red: false }, { s: '♣', red: false }, { s: '♥', red: true }, { s: '♦', red: true }];
 const ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
-const blackjackSessions = {}; // telegram_id -> { deck, playerHand, dealerHand, bet }
+const blackjackSessions = {}; 
 
 function freshDeck() {
   var d = [];
@@ -345,7 +345,7 @@ app.post('/api/poker/draw', requireTelegramUser, async function (req, res) {
 });
 
 // ---------- MINAS ----------
-const minasSessions = {}; // telegram_id -> estado de la partida activa de minas
+const minasSessions = {}; 
 
 app.post('/api/minas/state', requireTelegramUser, async function (req, res) {
   try {
@@ -367,7 +367,6 @@ app.post('/api/minas/start', requireTelegramUser, async function (req, res) {
     if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
     if (minasLogic.ALLOWED_MINES.indexOf(minesCount) === -1) return res.status(400).json({ error: 'Cantidad de minas inválida.' });
 
-    // Descontar la apuesta de inmediato
     var newBalance = await applyDelta(req.tgUser.id, -bet, 'minas', 'Apuesta inicial de Minas');
 
     var bombs = minasLogic.pickBombs(minesCount);
@@ -397,7 +396,6 @@ app.post('/api/minas/reveal', requireTelegramUser, async function (req, res) {
     if (isNaN(index) || index < 0 || index >= minasLogic.N) return res.status(400).json({ error: 'Casilla inválida.' });
     if (session.revealed.indexOf(index) !== -1) return res.status(400).json({ error: 'Casilla ya destapada.' });
 
-    // Si choca con una mina
     if (session.bombs.indexOf(index) !== -1) {
       var bombs = session.bombs;
       delete minasSessions[req.tgUser.id];
@@ -409,7 +407,6 @@ app.post('/api/minas/reveal', requireTelegramUser, async function (req, res) {
     var k = session.revealed.length;
     session.mult = minasLogic.multiplier(k, session.minesCount);
 
-    // Si limpia todo el tablero de golpe
     if (k === minasLogic.N - session.minesCount) {
       var payout = Math.floor(session.bet * session.mult);
       var newBalance = await applyDelta(req.tgUser.id, payout, 'minas', 'Tablero limpiado en Minas');
@@ -443,7 +440,7 @@ app.post('/api/minas/cashout', requireTelegramUser, async function (req, res) {
 });
 
 // ---------- HI-LO ----------
-const hiloSessions = {}; // telegram_id -> estado de la partida de hi-lo
+const hiloSessions = {}; 
 
 app.post('/api/hilo/state', requireTelegramUser, async function (req, res) {
   try {
@@ -491,18 +488,35 @@ app.post('/api/hilo/start', requireTelegramUser, async function (req, res) {
           cashoutGain: Math.floor(this.bet * cashoutMult)
         };
       }
-@@ -500,7 +505,9 @@
+    };
+    hiloSessions[req.tgUser.id] = session;
+
+    res.json(Object.assign({ balance: newBalance }, session.publicState()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/hilo/guess', requireTelegramUser, async function (req, res) {
+  try {
     var session = hiloSessions[req.tgUser.id];
     if (!session) return res.status(400).json({ error: 'No hay una partida de Hi-Lo activa.' });
     var guess = req.body.guess;
-    if (guess !== 'higher' && guess !== 'lower') return res.status(400).json({ error: 'Adivinanza inválida.' });
     if (guess !== 'higher' && guess !== 'lower' && guess !== 'equal') {
       return res.status(400).json({ error: 'Adivinanza inválida.' });
     }
 
     if (session.deck.length === 0) {
       delete hiloSessions[req.tgUser.id];
-@@ -514,48 +521,49 @@
+      return res.status(400).json({ error: 'El mazo se ha agotado.' });
+    }
+
+    var pRound = hiloLogic.probGuess(session.deck, session.current.val, guess);
+    if (pRound <= 0) return res.status(400).json({ error: 'Apuesta imposible con la carta actual.' });
+
+    var nextIndex = Math.floor(Math.random() * session.deck.length);
+    var nextCard = session.deck.splice(nextIndex, 1)[0];
+
     var isWin = false;
     if (guess === 'higher') isWin = nextCard.val > session.current.val;
     else if (guess === 'lower') isWin = nextCard.val < session.current.val;
@@ -552,3 +566,4 @@ app.post('/api/hilo/cashout', requireTelegramUser, async function (req, res) {
 
 app.listen(PORT, function () {
   console.log('Casino corriendo en el puerto ' + PORT);
+});
