@@ -265,10 +265,10 @@ app.post('/api/roulette/spin', requireTelegramUser, async function (req, res) {
   }
 });
 
-// ---------- VIDEO PÓKER (Jacks or Better) ----------
+// ---------- VIDEO PÓKER (Jacks or Better) - Rutas corregidas a /api/videopoker/... ----------
 const activePokerGames = {};
 
-app.post('/api/poker/deal', requireTelegramUser, async function (req, res) {
+app.post('/api/videopoker/deal', requireTelegramUser, async function (req, res) {
   try {
     var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
     var betAmount = parseInt(req.body.bet, 10);
@@ -280,7 +280,7 @@ app.post('/api/poker/deal', requireTelegramUser, async function (req, res) {
       return res.status(400).json({ error: 'Saldo insuficiente.' });
     }
 
-    var newBalance = await applyDelta(req.tgUser.id, -betAmount, 'poker', 'Apuesta Video Póker');
+    var newBalance = await applyDelta(req.tgUser.id, -betAmount, 'videopoker', 'Apuesta Video Póker');
 
     var deck = pokerLogic.freshDeck();
     var hand = deck.splice(0, 5);
@@ -300,7 +300,7 @@ app.post('/api/poker/deal', requireTelegramUser, async function (req, res) {
   }
 });
 
-app.post('/api/poker/draw', requireTelegramUser, async function (req, res) {
+app.post('/api/videopoker/draw', requireTelegramUser, async function (req, res) {
   try {
     var session = activePokerGames[req.tgUser.id];
     if (!session) {
@@ -309,10 +309,10 @@ app.post('/api/poker/draw', requireTelegramUser, async function (req, res) {
 
     var hand = session.hand;
     var deck = session.deck;
-    var indexesToHold = req.body.heldIndexes || [];
+    var holds = req.body.holds || [false, false, false, false, false];
 
     for (let i = 0; i < 5; i++) {
-      if (!indexesToHold.includes(i)) {
+      if (!holds[i]) {
         if (deck.length > 0) {
           hand[i] = deck.pop();
         }
@@ -322,10 +322,11 @@ app.post('/api/poker/draw', requireTelegramUser, async function (req, res) {
     var resultType = pokerLogic.evalHand(hand);
     var multiplier = pokerLogic.PAY_TABLE[resultType] || 0;
     var winnings = session.bet * multiplier;
+    var delta = winnings - session.bet;
 
     var finalBalance;
-    if (winnings > 0) {
-      finalBalance = await applyDelta(req.tgUser.id, winnings, 'poker', 'Premio Video Póker (' + resultType + ')');
+    if (delta !== 0) {
+      finalBalance = await applyDelta(req.tgUser.id, delta, 'videopoker', 'Premio Video Póker (' + resultType + ')');
     } else {
       finalBalance = (await getUser(req.tgUser.id)).balance;
     }
@@ -334,9 +335,9 @@ app.post('/api/poker/draw', requireTelegramUser, async function (req, res) {
 
     res.json({
       hand: hand,
-      resultType: resultType,
-      multiplier: multiplier,
-      winnings: winnings,
+      result: resultType,
+      mult: multiplier,
+      delta: delta,
       balance: finalBalance
     });
   } catch (e) {
