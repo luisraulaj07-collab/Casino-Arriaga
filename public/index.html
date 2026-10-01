@@ -26,5 +26,45 @@
       <a href="minas.html" style="width:100%"><button style="width:100%">🎡 Jugar Minas</button></a>
       <a href="videopoker.html" style="width:100%"><button style="width:100%">🎡 Jugar Poker</button></a>
       <a href="hilo.html" style="width:100%"><button style="width:100%">🎡 Jugar Hilo</button></a>
-      </div>
+    </div>
   </div>
+</div>
+
+<script>
+  var initData = "";
+  try {
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.ready();
+      initData = window.Telegram.WebApp.initData || "";
+    }
+  } catch (e) {
+    console.error("Error al leer Telegram WebApp:", e);
+  }
+
+  if (!initData) {
+    initData = sessionStorage.getItem('cmng_initData') || '';
+  } else {
+    sessionStorage.setItem('cmng_initData', initData);
+  }
+
+  fetch('/api/me', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ initData: initData })
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+      if(data.error) {
+          document.getElementById('err').textContent = data.error;
+          return;
+      }
+      document.getElementById('name').textContent = data.name;
+      document.getElementById('balance').textContent = '$' + data.balance;
+  })
+  .catch(function(err) {
+      console.error("Error crítico en /api/me:", err);
+      document.getElementById('err').textContent = 'Error de conexión con el servidor.';
+  });
+</script>
+</body>
+</html>
