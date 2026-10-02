@@ -1,5 +1,7 @@
 require('dotenv').config();
 const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const path = require('path');
 const { getOrCreateUser, getUser, listUsers, applyDelta } = require('./db');
 const { verifyInitData } = require('./telegramAuth');
@@ -17,6 +19,9 @@ if (!BOT_TOKEN) {
 }
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -565,6 +570,54 @@ app.post('/api/hilo/cashout', requireTelegramUser, async function (req, res) {
   }
 });
 
-app.listen(PORT, function () {
-  console.log('Casino corriendo en el puerto ' + PORT);
+// ---------- GESTIÓN DE WEBSOCKETS (PÓKER MULTIJUGADOR) ----------
+const multiplayerPokerRooms = {};
+
+io.on('connection', function(socket) {
+  console.log('Cliente conectado por WebSockets:', socket.id);
+
+  socket.on('join_multiplayer_table', function(data) {
+    var roomId = data.roomId || 'mesa_poker_1';
+    socket.join(roomId);
+
+    if (!multiplayerPokerRooms[roomId]) {
+      multiplayerPokerRooms[roomId] = {
+        players: [],
+        pot: 0,
+        status: 'waiting'
+      };
+    }
+
+    var room = multiplayerPokerRooms[roomId];
+    var existingPlayer = room.players.find(function(p) { return p.id === socket.id; });
+    
+    if (!existingPlayer) {
+      room.players.push({
+        id: socket.id,
+        name: data.name || 'Jugador',
+        chips: data.chips || 1000,
+        cards: []
+      });
+    }
+
+    io.to(roomId).emit('update_multiplayer_table', room);
+  });
+
+  socket.on('disconnect', function() {
+    console.log('Cliente desconectado de WebSockets:', socket.id);
+    for (var roomId in multiplayerPokerRooms) {
+      var room = multiplayerPokerRooms[roomId];
+      var initialLength = room.players.length;
+      room.players = room.players.filter(function(p) { return p.id !== socket.id; });
+      
+      if (room.players.length !== initialLength) {
+        io.to(roomId).emit('update_multiplayer_table', room);
+      }
+    }
+  });
+});
+
+// ---------- INICIO DEL SERVIDOR (HTTP + WebSockets) ----------
+server.listen(PORT, function () {
+  console.log('Casino con soporte multijugador corriendo en el puerto ' + PORT);
 });
