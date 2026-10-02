@@ -637,31 +637,68 @@ io.on('connection', function(socket) {
     var currentPlayer = room.players[room.currentTurnIndex];
     if (!currentPlayer || currentPlayer.id !== socket.id) return;
 
-    var action = data.action;
+    var action = data.action; // 'bet', 'check', 'fold'
     var amount = parseInt(data.amount, 10) || 0;
 
+    // Calcular la apuesta máxima actual en la mesa
+    var maxCurrentBet = 0;
+    room.players.forEach(function(p) {
+      if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
+    });
+
     if (action === 'bet') {
-      if (amount > currentPlayer.chips) amount = currentPlayer.chips;
-      currentPlayer.chips -= amount;
-      currentPlayer.currentBet += amount;
-      room.pot += amount;
-      room.dealerMessage = currentPlayer.name + ' apostó $' + amount;
+      var neededToCall = maxCurrentBet - currentPlayer.currentBet;
+      var totalInvestment = neededToCall + amount;
+
+      if (totalInvestment > currentPlayer.chips) {
+        totalInvestment = currentPlayer.chips; // All-in si no alcanza
+      }
+
+      currentPlayer.chips -= totalInvestment;
+      currentPlayer.currentBet += totalInvestment;
+      room.pot += totalInvestment;
+      room.dealerMessage = currentPlayer.name + ' apostó / subió $' + totalInvestment;
     } else if (action === 'check') {
-      room.dealerMessage = currentPlayer.name + ' pasó.';
+      if (maxCurrentBet > currentPlayer.currentBet) {
+        room.dealerMessage = currentPlayer.name + ' pasó.';
+      } else {
+        room.dealerMessage = currentPlayer.name + ' pasó (Check).';
+      }
     } else if (action === 'fold') {
       currentPlayer.folded = true;
       room.dealerMessage = currentPlayer.name + ' se retiró.';
     }
 
-    do {
-      room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
-    } while (room.players[room.currentTurnIndex].folded && room.players.some(function(p) { return !p.folded; }));
-
+    // Verificar si queda un solo jugador activo (gana por retirada)
     var activePlayers = room.players.filter(function(p) { return !p.folded; });
     if (activePlayers.length === 1) {
       activePlayers[0].chips += room.pot;
       room.dealerMessage = '¡' + activePlayers[0].name + ' gana el pozo de $' + room.pot + ' por retirada!';
       room.status = 'finished';
+      room.pot = 0;
+      broadcastRoomState(roomId);
+      return;
+    }
+
+    // Avanzar al siguiente jugador activo
+    var turnsChecked = 0;
+    do {
+      room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+      turnsChecked++;
+    } while (room.players[room.currentTurnIndex].folded && turnsChecked < room.players.length);
+
+    // Verificar si todos los jugadores activos ya igualaron la apuesta más alta para cerrar la ronda
+    var bettingComplete = activePlayers.every(function(p) {
+      return p.currentBet === maxCurrentBet;
+    });
+
+    if (bettingComplete && turnsChecked >= activePlayers.length) {
+      room.status = 'finished';
+      var winner = activePlayers.reduce(function(prev, current) {
+        return (prev.chips > current.chips) ? prev : current;
+      });
+      winner.chips += room.pot;
+      room.dealerMessage = '¡Ronda finalizada! ' + winner.name + ' se lleva el pozo de $' + room.pot;
       room.pot = 0;
     }
 
