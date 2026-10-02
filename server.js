@@ -270,7 +270,7 @@ app.post('/api/roulette/spin', requireTelegramUser, async function (req, res) {
   }
 });
 
-// ---------- VIDEO PÓKER (Jacks or Better) - Rutas corregidas a /api/videopoker/... ----------
+// ---------- VIDEO PÓKER (Jacks or Better) ----------
 const activePokerGames = {};
 
 app.post('/api/videopoker/deal', requireTelegramUser, async function (req, res) {
@@ -583,8 +583,12 @@ io.on('connection', function(socket) {
     if (!multiplayerPokerRooms[roomId]) {
       multiplayerPokerRooms[roomId] = {
         players: [],
+        deck: [],
+        communityCards: [],
         pot: 0,
-        status: 'waiting'
+        currentTurnIndex: 0,
+        status: 'waiting', // waiting, betting, finished
+        dealerMessage: 'Esperando jugadores...'
       };
     }
 
@@ -596,11 +600,77 @@ io.on('connection', function(socket) {
         id: socket.id,
         name: data.name || 'Jugador',
         chips: data.chips || 1000,
-        cards: []
+        currentBet: 0,
+        cards: [],
+        folded: false
       });
     }
 
-    io.to(roomId).emit('update_multiplayer_table', room);
+    broadcastRoomState(roomId);
+  });
+
+  // Iniciar una nueva mano usando pokerLogic.freshDeck()
+  socket.on('start_hand', function(data) {
+    var roomId = data.roomId || 'mesa_poker_1';
+    var room = multiplayerPokerRooms[roomId];
+    if (!room || room.players.length < 2) return;
+
+    room.deck = pokerLogic.freshDeck();
+    room.pot = 0;
+    room.communityCards = room.deck.splice(0, 3); // Flop de 3 cartas comunitarias
+    room.status = 'betting';
+    room.currentTurnIndex = 0;
+
+    room.players.forEach(function(p) {
+      p.cards = [room.deck.pop(), room.deck.pop()];
+      p.currentBet = 0;
+      p.folded = false;
+    });
+
+    room.dealerMessage = '¡Mano iniciada! Turno de ' + room.players[0].name;
+    broadcastRoomState(roomId);
+  });
+
+  // Acciones de apuesta en tiempo real
+  socket.on('player_action', function(data) {
+    var roomId = data.roomId || 'mesa_poker_1';
+    var room = multiplayerPokerRooms[roomId];
+    if (!room || room.status !== 'betting') return;
+
+    var currentPlayer = room.players[room.currentTurnIndex];
+    if (!currentPlayer || currentPlayer.id !== socket.id) return; // Validar turno
+
+    var action = data.action; // 'bet', 'check', 'fold'
+    var amount = parseInt(data.amount, 10) || 0;
+
+    if (action === 'bet') {
+      if (amount > currentPlayer.chips) amount = currentPlayer.chips;
+      currentPlayer.chips -= amount;
+      currentPlayer.currentBet += amount;
+      room.pot += amount;
+      room.dealerMessage = currentPlayer.name + ' apostó $' + amount;
+    } else if (action === 'check') {
+      room.dealerMessage = currentPlayer.name + ' pasó.';
+    } else if (action === 'fold') {
+      currentPlayer.folded = true;
+      room.dealerMessage = currentPlayer.name + ' se retiró.';
+    }
+
+    // Pasar el turno al siguiente jugador activo que no se haya retirado
+    do {
+      room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+    } while (room.players[room.currentTurnIndex].folded && room.players.some(function(p) { return !p.folded; }));
+
+    // Si queda un solo jugador activo, gana el pozo automáticamente por retirada
+    var activePlayers = room.players.filter(function(p) { return !p.folded; });
+    if (activePlayers.length === 1) {
+      activePlayers[0].chips += room.pot;
+      room.dealerMessage = '¡' + activePlayers[0].name + ' gana el pozo de $' + room.pot + ' por retirada!';
+      room.status = 'finished';
+      room.pot = 0;
+    }
+
+    broadcastRoomState(roomId);
   });
 
   socket.on('disconnect', function() {
@@ -611,11 +681,18 @@ io.on('connection', function(socket) {
       room.players = room.players.filter(function(p) { return p.id !== socket.id; });
       
       if (room.players.length !== initialLength) {
-        io.to(roomId).emit('update_multiplayer_table', room);
+        if (room.players.length < 2) room.status = 'waiting';
+        broadcastRoomState(roomId);
       }
     }
   });
 });
+
+function broadcastRoomState(roomId) {
+  var room = multiplayerPokerRooms[roomId];
+  if (!room) return;
+  io.to(roomId).emit('update_multiplayer_table', room);
+}
 
 // ---------- INICIO DEL SERVIDOR (HTTP + WebSockets) ----------
 server.listen(PORT, function () {
