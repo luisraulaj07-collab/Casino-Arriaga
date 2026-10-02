@@ -25,7 +25,6 @@ const io = new Server(server);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Servir la página principal del casino
 app.get('/', function (req, res) {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -587,7 +586,7 @@ io.on('connection', function(socket) {
         communityCards: [],
         pot: 0,
         currentTurnIndex: 0,
-        status: 'waiting', // waiting, betting, finished
+        status: 'waiting', 
         dealerMessage: 'Esperando jugadores...'
       };
     }
@@ -609,7 +608,6 @@ io.on('connection', function(socket) {
     broadcastRoomState(roomId);
   });
 
-  // Iniciar una nueva mano usando pokerLogic.freshDeck()
   socket.on('start_hand', function(data) {
     var roomId = data.roomId || 'mesa_poker_1';
     var room = multiplayerPokerRooms[roomId];
@@ -617,7 +615,7 @@ io.on('connection', function(socket) {
 
     room.deck = pokerLogic.freshDeck();
     room.pot = 0;
-    room.communityCards = room.deck.splice(0, 3); // Flop de 3 cartas comunitarias
+    room.communityCards = room.deck.splice(0, 3);
     room.status = 'betting';
     room.currentTurnIndex = 0;
 
@@ -631,16 +629,15 @@ io.on('connection', function(socket) {
     broadcastRoomState(roomId);
   });
 
-  // Acciones de apuesta en tiempo real
   socket.on('player_action', function(data) {
     var roomId = data.roomId || 'mesa_poker_1';
     var room = multiplayerPokerRooms[roomId];
     if (!room || room.status !== 'betting') return;
 
     var currentPlayer = room.players[room.currentTurnIndex];
-    if (!currentPlayer || currentPlayer.id !== socket.id) return; // Validar turno
+    if (!currentPlayer || currentPlayer.id !== socket.id) return;
 
-    var action = data.action; // 'bet', 'check', 'fold'
+    var action = data.action;
     var amount = parseInt(data.amount, 10) || 0;
 
     if (action === 'bet') {
@@ -656,12 +653,10 @@ io.on('connection', function(socket) {
       room.dealerMessage = currentPlayer.name + ' se retiró.';
     }
 
-    // Pasar el turno al siguiente jugador activo que no se haya retirado
     do {
       room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
     } while (room.players[room.currentTurnIndex].folded && room.players.some(function(p) { return !p.folded; }));
 
-    // Si queda un solo jugador activo, gana el pozo automáticamente por retirada
     var activePlayers = room.players.filter(function(p) { return !p.folded; });
     if (activePlayers.length === 1) {
       activePlayers[0].chips += room.pot;
@@ -694,7 +689,6 @@ function broadcastRoomState(roomId) {
   io.to(roomId).emit('update_multiplayer_table', room);
 }
 
-// ---------- INICIO DEL SERVIDOR (HTTP + WebSockets) ----------
 server.listen(PORT, function () {
   console.log('Casino con soporte multijugador corriendo en el puerto ' + PORT);
 });
