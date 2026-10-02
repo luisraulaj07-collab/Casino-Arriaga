@@ -58,7 +58,7 @@
     flex-direction: column;
     gap: 6px;
     margin: 6px 0;
-    max-height: 150px;
+    max-height: 140px;
     overflow-y: auto;
   }
   .player-seat {
@@ -89,6 +89,10 @@
     flex: 1;
     padding: 8px;
     font-size: 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    border: none;
+    font-weight: bold;
   }
 </style>
 </head>
@@ -100,7 +104,7 @@
 
     <div class="hud" style="margin-top:8px;">
       <div>Jugador<br><b id="myName">—</b></div>
-      <div style="text-align:right">Fichas Disponibles<br><b id="myChips">1000</b></div>
+      <div style="text-align:right">Fichas en Mesa<br><b id="myChips">1000</b></div>
     </div>
 
     <div class="pot-display">
@@ -120,16 +124,16 @@
       <div class="card" style="background:rgba(255,255,255,0.1); color:#777;">-</div>
     </div>
 
-    <div style="font-size: 11px; color: #cfc2a4; text-align: center; margin-top:4px;">Jugadores en la mesa:</div>
+    <div style="font-size: 11px; color: #cfc2a4; text-align: center; margin-top:4px;">Jugadores sentados en la mesa:</div>
     <div class="players-container" id="playersList"></div>
   </div>
 
   <div>
     <div class="error" id="err"></div>
-    <div class="msg" id="msg" style="text-align:center; font-size:12px; margin-bottom:4px;">Conectando...</div>
+    <div class="msg" id="msg" style="text-align:center; font-size:12px; margin-bottom:4px;">Conectando a la mesa multijugador...</div>
 
     <div class="table-actions" id="waitingControls">
-      <button id="startBtn" style="background-color:#b39b58; color:#0d281f; font-weight:bold;">Iniciar Mano</button>
+      <button id="startBtn" style="width:100%; background-color:#b39b58; color:#0d281f;">Iniciar / Siguiente Mano</button>
     </div>
 
     <div class="table-actions" id="gameControls" style="display:none;">
@@ -138,7 +142,7 @@
       <button id="foldBtn" style="background-color:#f44336; color:#fff;">Retirarse</button>
     </div>
 
-    <a class="lobby-link" href="index.html" style="display:block; text-align:center; margin-top:10px; font-size:12px;">← Volver al Lobby</a>
+    <a class="lobby-link" href="index.html" style="display:block; text-align:center; margin-top:10px; font-size:12px;">← Volver a la mesa principal</a>
   </div>
 </div>
 
@@ -150,7 +154,6 @@
   var myName = "Jugador";
   var myBalance = 1000;
   var socket = io();
-  var currentRoomState = null;
 
   var el = {
     myName: document.getElementById('myName'),
@@ -169,6 +172,7 @@
     foldBtn: document.getElementById('foldBtn')
   };
 
+  // 1. Obtener perfil de usuario
   fetch('/api/me', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -176,20 +180,32 @@
   })
   .then(function(r) { return r.json(); })
   .then(function(data) {
-      if(data.error) { return; }
+      if(data.error) {
+          el.err.textContent = data.error;
+          return;
+      }
       myName = data.name;
       myBalance = data.balance;
       el.myName.textContent = myName;
       el.myChips.textContent = '$' + myBalance;
 
-      socket.emit('join_multiplayer_table', { roomId: 'mesa_principal_1', name: myName, chips: myBalance });
+      socket.emit('join_multiplayer_table', {
+          roomId: 'mesa_principal_1',
+          name: myName,
+          chips: myBalance
+      });
+      el.msg.textContent = 'Te has sentado en la mesa.';
   })
   .catch(function() {
-      socket.emit('join_multiplayer_table', { roomId: 'mesa_principal_1', name: 'Invitado', chips: 1000 });
+      socket.emit('join_multiplayer_table', {
+          roomId: 'mesa_principal_1',
+          name: 'Invitado Web',
+          chips: 1000
+      });
   });
 
+  // 2. Escuchar actualizaciones en tiempo real de la mesa
   socket.on('update_multiplayer_table', function(roomState) {
-      currentRoomState = roomState;
       el.potAmount.textContent = roomState.pot || 0;
       el.msg.textContent = roomState.dealerMessage || '';
       el.playersList.innerHTML = '';
@@ -197,7 +213,7 @@
       var myTurn = false;
       var activePlayer = roomState.players[roomState.currentTurnIndex];
 
-      roomState.players.forEach(function(p, idx) {
+      roomState.players.forEach(function(p) {
           var div = document.createElement('div');
           var isMe = (p.id === socket.id);
           var isTurn = (roomState.status === 'betting' && activePlayer && activePlayer.id === p.id);
@@ -210,7 +226,7 @@
               el.myChips.textContent = '$' + p.chips;
               if (isTurn && roomState.status === 'betting') myTurn = true;
               
-              // Pintar cartas personales
+              // Renderizar tus cartas personales
               el.myCardsContainer.innerHTML = '';
               if (p.cards && p.cards.length > 0) {
                   p.cards.forEach(function(c) {
@@ -219,11 +235,13 @@
                       cDiv.innerHTML = c.rank + '<br>' + c.suit;
                       el.myCardsContainer.appendChild(cDiv);
                   });
+              } else {
+                  el.myCardsContainer.innerHTML = '<div class="card" style="background:rgba(255,255,255,0.1); color:#777;">-</div><div class="card" style="background:rgba(255,255,255,0.1); color:#777;">-</div>';
               }
           }
       });
 
-      // Pintar cartas comunitarias si la mano comenzó
+      // Renderizar cartas comunitarias
       if (roomState.communityCards && roomState.communityCards.length > 0) {
           el.communityCards.innerHTML = '';
           roomState.communityCards.forEach(function(c) {
@@ -232,9 +250,11 @@
               cDiv.innerHTML = c.rank + '<br>' + c.suit;
               el.communityCards.appendChild(cDiv);
           });
+      } else {
+          el.communityCards.innerHTML = '<div class="card" style="background:rgba(255,255,255,0.1); color:#777;">?</div><div class="card" style="background:rgba(255,255,255,0.1); color:#777;">?</div><div class="card" style="background:rgba(255,255,255,0.1); color:#777;">?</div>';
       }
 
-      // Control de botones según el turno y estado
+      // Alternar controles de juego o de espera según el turno
       if (roomState.status === 'betting' && myTurn) {
           el.waitingControls.style.display = 'none';
           el.gameControls.style.display = 'flex';
@@ -245,6 +265,7 @@
       }
   });
 
+  // 3. Eventos de botones
   el.startBtn.addEventListener('click', function() {
       socket.emit('start_hand', { roomId: 'mesa_principal_1' });
   });
