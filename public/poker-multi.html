@@ -12,11 +12,11 @@
     background: radial-gradient(circle, #1b4d3e 0%, #0d281f 100%);
     border: 6px solid #b39b58;
     border-radius: 16px;
-    padding: 16px;
+    padding: 14px;
     box-shadow: inset 0 0 20px rgba(0,0,0,0.7), 0 8px 20px rgba(0,0,0,0.5);
     margin: 10px auto;
     max-width: 480px;
-    min-height: 480px;
+    min-height: 520px;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -26,39 +26,69 @@
     background: rgba(0, 0, 0, 0.4);
     border: 1px solid #b39b58;
     border-radius: 8px;
-    padding: 8px;
-    margin: 10px 0;
+    padding: 6px;
+    margin: 6px 0;
     color: #f3e5ab;
-    font-size: 15px;
+    font-size: 14px;
     font-weight: bold;
   }
+  .community-cards, .my-cards {
+    display: flex;
+    justify-content: center;
+    gap: 6px;
+    margin: 6px 0;
+  }
+  .card {
+    background: #fff;
+    color: #000;
+    width: 36px;
+    height: 50px;
+    border-radius: 4px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    font-weight: bold;
+    font-size: 14px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+  }
+  .card.red { color: #d32f2f; }
   .players-container {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    margin: 10px 0;
-    max-height: 220px;
+    gap: 6px;
+    margin: 6px 0;
+    max-height: 150px;
     overflow-y: auto;
   }
   .player-seat {
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(179, 155, 88, 0.4);
-    border-radius: 8px;
-    padding: 8px 12px;
+    border-radius: 6px;
+    padding: 6px 10px;
     display: flex;
     justify-content: space-between;
     align-items: center;
     color: #fff;
-    font-size: 14px;
+    font-size: 13px;
   }
   .player-seat.me {
     border-color: #b39b58;
     background: rgba(179, 155, 88, 0.15);
   }
+  .player-seat.active-turn {
+    border-color: #4caf50;
+    box-shadow: 0 0 8px rgba(76, 175, 80, 0.6);
+  }
   .table-actions {
     display: flex;
-    gap: 8px;
-    margin-top: 12px;
+    gap: 6px;
+    margin-top: 8px;
+  }
+  .table-actions button {
+    flex: 1;
+    padding: 8px;
+    font-size: 12px;
   }
 </style>
 </head>
@@ -68,30 +98,47 @@
     <div class="brand" style="text-align:center;">CARTEL MEXICANO</div>
     <div class="brand-sub" style="text-align:center;">PÓKER EN VIVO — MESA MULTIJUGADOR</div>
 
-    <div class="hud" style="margin-top:10px;">
+    <div class="hud" style="margin-top:8px;">
       <div>Jugador<br><b id="myName">—</b></div>
-      <div style="text-align:right">Fichas en Mesa<br><b id="myChips">1000</b></div>
+      <div style="text-align:right">Fichas Disponibles<br><b id="myChips">1000</b></div>
     </div>
 
     <div class="pot-display">
       Pozo Acumulado: $<span id="potAmount">0</span>
     </div>
 
-    <div style="font-size: 12px; color: #cfc2a4; text-align: center; margin-bottom: 4px;">Jugadores sentados en la mesa:</div>
-    <div class="players-container" id="playersList">
-      <!-- Los jugadores se pintarán aquí dinámicamente -->
+    <div style="font-size: 11px; color: #cfc2a4; text-align: center;">Cartas Comunitarias:</div>
+    <div class="community-cards" id="communityCards">
+      <div class="card" style="background:rgba(255,255,255,0.1); color:#777;">?</div>
+      <div class="card" style="background:rgba(255,255,255,0.1); color:#777;">?</div>
+      <div class="card" style="background:rgba(255,255,255,0.1); color:#777;">?</div>
     </div>
+
+    <div style="font-size: 11px; color: #cfc2a4; text-align: center; margin-top:4px;">Tus Cartas Personales:</div>
+    <div class="my-cards" id="myCardsContainer">
+      <div class="card" style="background:rgba(255,255,255,0.1); color:#777;">-</div>
+      <div class="card" style="background:rgba(255,255,255,0.1); color:#777;">-</div>
+    </div>
+
+    <div style="font-size: 11px; color: #cfc2a4; text-align: center; margin-top:4px;">Jugadores en la mesa:</div>
+    <div class="players-container" id="playersList"></div>
   </div>
 
   <div>
     <div class="error" id="err"></div>
-    <div class="msg" id="msg">Conectando a la mesa multijugador...</div>
+    <div class="msg" id="msg" style="text-align:center; font-size:12px; margin-bottom:4px;">Conectando...</div>
 
-    <div class="table-actions" id="gameControls">
-      <button id="readyBtn" style="width:100%; background-color:#b39b58; color:#0d281f; font-weight:bold;">Listos para iniciar mano</button>
+    <div class="table-actions" id="waitingControls">
+      <button id="startBtn" style="background-color:#b39b58; color:#0d281f; font-weight:bold;">Iniciar Mano</button>
     </div>
 
-    <a class="lobby-link" href="index.html" style="display:block; text-align:center; margin-top:14px;">← Volver a la mesa principal</a>
+    <div class="table-actions" id="gameControls" style="display:none;">
+      <button id="betBtn" style="background-color:#4caf50; color:#fff;">Apostar $50</button>
+      <button id="checkBtn" style="background-color:#ff9800; color:#fff;">Pasar</button>
+      <button id="foldBtn" style="background-color:#f44336; color:#fff;">Retirarse</button>
+    </div>
+
+    <a class="lobby-link" href="index.html" style="display:block; text-align:center; margin-top:10px; font-size:12px;">← Volver al Lobby</a>
   </div>
 </div>
 
@@ -103,18 +150,25 @@
   var myName = "Jugador";
   var myBalance = 1000;
   var socket = io();
+  var currentRoomState = null;
 
   var el = {
     myName: document.getElementById('myName'),
     myChips: document.getElementById('myChips'),
     playersList: document.getElementById('playersList'),
     potAmount: document.getElementById('potAmount'),
+    communityCards: document.getElementById('communityCards'),
+    myCardsContainer: document.getElementById('myCardsContainer'),
     msg: document.getElementById('msg'),
     err: document.getElementById('err'),
-    readyBtn: document.getElementById('readyBtn')
+    startBtn: document.getElementById('startBtn'),
+    waitingControls: document.getElementById('waitingControls'),
+    gameControls: document.getElementById('gameControls'),
+    betBtn: document.getElementById('betBtn'),
+    checkBtn: document.getElementById('checkBtn'),
+    foldBtn: document.getElementById('foldBtn')
   };
 
-  // 1. Primero obtenemos el perfil del usuario mediante la API HTTP existente
   fetch('/api/me', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -122,55 +176,89 @@
   })
   .then(function(r) { return r.json(); })
   .then(function(data) {
-      if(data.error) {
-          el.err.textContent = data.error;
-          return;
-      }
+      if(data.error) { return; }
       myName = data.name;
       myBalance = data.balance;
       el.myName.textContent = myName;
       el.myChips.textContent = '$' + myBalance;
 
-      // 2. Una vez autenticado, nos unimos a la sala por WebSockets
-      socket.emit('join_multiplayer_table', {
-          roomId: 'mesa_principal_1',
-          name: myName,
-          chips: myBalance
-      });
-      el.msg.textContent = 'Te has sentado en la mesa.';
+      socket.emit('join_multiplayer_table', { roomId: 'mesa_principal_1', name: myName, chips: myBalance });
   })
-  .catch(function(err) {
-      console.error("Error al autenticar:", err);
-      // Fallback para pruebas locales sin Telegram
-      socket.emit('join_multiplayer_table', {
-          roomId: 'mesa_principal_1',
-          name: 'Invitado Web',
-          chips: 1000
-      });
+  .catch(function() {
+      socket.emit('join_multiplayer_table', { roomId: 'mesa_principal_1', name: 'Invitado', chips: 1000 });
   });
 
-  // 3. Escuchar actualizaciones de la mesa en tiempo real
   socket.on('update_multiplayer_table', function(roomState) {
+      currentRoomState = roomState;
       el.potAmount.textContent = roomState.pot || 0;
+      el.msg.textContent = roomState.dealerMessage || '';
       el.playersList.innerHTML = '';
 
-      roomState.players.forEach(function(p) {
+      var myTurn = false;
+      var activePlayer = roomState.players[roomState.currentTurnIndex];
+
+      roomState.players.forEach(function(p, idx) {
           var div = document.createElement('div');
           var isMe = (p.id === socket.id);
-          div.className = 'player-seat' + (isMe ? ' me' : '');
-          div.innerHTML = '<span><b>' + p.name + '</b>' + (isMe ? ' (Tú)' : '') + '</span><span>$' + p.chips + '</span>';
+          var isTurn = (roomState.status === 'betting' && activePlayer && activePlayer.id === p.id);
+          
+          div.className = 'player-seat' + (isMe ? ' me' : '') + (isTurn ? ' active-turn' : '');
+          div.innerHTML = '<span><b>' + p.name + '</b>' + (p.folded ? ' (Retirado)' : '') + '</span><span>$' + p.chips + '</span>';
           el.playersList.appendChild(div);
+
+          if (isMe) {
+              el.myChips.textContent = '$' + p.chips;
+              if (isTurn && roomState.status === 'betting') myTurn = true;
+              
+              // Pintar cartas personales
+              el.myCardsContainer.innerHTML = '';
+              if (p.cards && p.cards.length > 0) {
+                  p.cards.forEach(function(c) {
+                      var cDiv = document.createElement('div');
+                      cDiv.className = 'card' + (c.red ? ' red' : '');
+                      cDiv.innerHTML = c.rank + '<br>' + c.suit;
+                      el.myCardsContainer.appendChild(cDiv);
+                  });
+              }
+          }
       });
 
-      if(roomState.players.length < 2) {
-          el.msg.textContent = 'Esperando a más jugadores en la mesa...';
+      // Pintar cartas comunitarias si la mano comenzó
+      if (roomState.communityCards && roomState.communityCards.length > 0) {
+          el.communityCards.innerHTML = '';
+          roomState.communityCards.forEach(function(c) {
+              var cDiv = document.createElement('div');
+              cDiv.className = 'card' + (c.red ? ' red' : '');
+              cDiv.innerHTML = c.rank + '<br>' + c.suit;
+              el.communityCards.appendChild(cDiv);
+          });
+      }
+
+      // Control de botones según el turno y estado
+      if (roomState.status === 'betting' && myTurn) {
+          el.waitingControls.style.display = 'none';
+          el.gameControls.style.display = 'flex';
       } else {
-          el.msg.textContent = 'Mesa lista. ¡Próximamente fase de apuestas!';
+          el.gameControls.style.display = 'none';
+          el.waitingControls.style.display = 'flex';
+          el.startBtn.textContent = roomState.players.length < 2 ? 'Esperando más jugadores...' : 'Iniciar / Siguiente Mano';
       }
   });
 
-  el.readyBtn.addEventListener('click', function() {
-      el.msg.textContent = 'Indicador de listo enviado.';
+  el.startBtn.addEventListener('click', function() {
+      socket.emit('start_hand', { roomId: 'mesa_principal_1' });
+  });
+
+  el.betBtn.addEventListener('click', function() {
+      socket.emit('player_action', { roomId: 'mesa_principal_1', action: 'bet', amount: 50 });
+  });
+
+  el.checkBtn.addEventListener('click', function() {
+      socket.emit('player_action', { roomId: 'mesa_principal_1', action: 'check' });
+  });
+
+  el.foldBtn.addEventListener('click', function() {
+      socket.emit('player_action', { roomId: 'mesa_principal_1', action: 'fold' });
   });
 </script>
 </body>
