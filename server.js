@@ -600,6 +600,7 @@ io.on('connection', function(socket) {
         name: data.name || 'Jugador',
         chips: data.chips || 1000,
         currentBet: 0,
+        hasActed: false,
         cards: [],
         folded: false
       });
@@ -615,13 +616,14 @@ io.on('connection', function(socket) {
 
     room.deck = pokerLogic.freshDeck();
     room.pot = 0;
-    room.communityCards = room.deck.splice(0, 3);
+    room.communityCards = room.deck.splice(0, 5); // 5 cartas comunitarias listas
     room.status = 'betting';
     room.currentTurnIndex = 0;
 
     room.players.forEach(function(p) {
       p.cards = [room.deck.pop(), room.deck.pop()];
       p.currentBet = 0;
+      p.hasActed = false;
       p.folded = false;
     });
 
@@ -657,56 +659,52 @@ io.on('connection', function(socket) {
       currentPlayer.chips -= totalInvestment;
       currentPlayer.currentBet += totalInvestment;
       room.pot += totalInvestment;
+      currentPlayer.hasActed = true;
       room.dealerMessage = currentPlayer.name + ' apostó / subió $' + totalInvestment;
     } else if (action === 'check') {
-      if (maxCurrentBet > currentPlayer.currentBet) {
-        room.dealerMessage = currentPlayer.name + ' pasó.';
-      } else {
-        room.dealerMessage = currentPlayer.name + ' pasó (Check).';
-      }
+      room.dealerMessage = currentPlayer.name + ' pasó (Check).';
+      currentPlayer.hasActed = true;
     } else if (action === 'fold') {
       currentPlayer.folded = true;
+      currentPlayer.hasActed = true;
       room.dealerMessage = currentPlayer.name + ' se retiró.';
     }
 
-    // Verificar si queda un solo jugador activo (gana por retirada)
     var activePlayers = room.players.filter(function(p) { return !p.folded; });
+
+    // Si queda un solo jugador activo, gana por retirada
     if (activePlayers.length === 1) {
       activePlayers[0].chips += room.pot;
-      room.dealerMessage = '¡' + activePlayers[0].name + ' gana el pozo de $' + room.pot + ' por retirada!';
+      room.dealerMessage = '🏆 ¡' + activePlayers[0].name + ' gana el pozo de $' + room.pot + ' por retirada!';
       room.status = 'finished';
       room.pot = 0;
       broadcastRoomState(roomId);
       return;
     }
 
-    // Avanzar al siguiente jugador activo
+    // Verificar si TODOS los jugadores activos ya actuaron y sus apuestas están igualadas
+    var allActed = activePlayers.every(function(p) { return p.hasActed; });
+    var allBetsEqual = activePlayers.every(function(p) { return p.currentBet === maxCurrentBet; });
+
+    if (allActed && allBetsEqual) {
+      // ¡Ronda terminada! Ejecutar Showdown para declarar ganador por la mano más alta
+      triggerShowdown(room, activePlayers);
+      broadcastRoomState(roomId);
+      return;
+    }
+
+    // Avanzar al siguiente jugador activo que no haya hecho fold
     var turnsChecked = 0;
     do {
       room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
       turnsChecked++;
     } while (room.players[room.currentTurnIndex].folded && turnsChecked < room.players.length);
 
-    // Verificar si todos los jugadores activos ya igualaron la apuesta más alta para cerrar la ronda
-    var bettingComplete = activePlayers.every(function(p) {
-      return p.currentBet === maxCurrentBet;
-    });
-
-    if (bettingComplete && turnsChecked >= activePlayers.length) {
-      room.status = 'finished';
-      var winner = activePlayers.reduce(function(prev, current) {
-        return (prev.chips > current.chips) ? prev : current;
-      });
-      winner.chips += room.pot;
-      room.dealerMessage = '¡Ronda finalizada! ' + winner.name + ' se lleva el pozo de $' + room.pot;
-      room.pot = 0;
-    }
-
     broadcastRoomState(roomId);
   });
 
   socket.on('disconnect', function() {
-    console.log('Cliente desconectado de WebSockets:', socket.id);
+    console.log('Cliente conectado por WebSockets desconectado:', socket.id);
     for (var roomId in multiplayerPokerRooms) {
       var room = multiplayerPokerRooms[roomId];
       var initialLength = room.players.length;
@@ -719,6 +717,37 @@ io.on('connection', function(socket) {
     }
   });
 });
+
+// Función que evalúa la mano más alta en el Showdown usando pokerLogic
+function triggerShowdown(room, activePlayers) {
+  room.status = 'finished';
+
+  var bestPlayer = activePlayers[0];
+  var bestScoreDescription = 'Combinación';
+  var bestRankValue = -1;
+
+  // Pesos jerárquicos estándar para evaluar los resultados devueltos por pokerLogic.evalHand
+  var rankWeights = {
+    'Carta Alta': 1, 'Par': 2, 'Doble Par': 3, 'Trio': 4, 
+    'Escalera': 5, 'Color': 6, 'Full House': 7, 'Poker': 8, 'Escalera de Color': 9
+  };
+
+  activePlayers.forEach(function(p) {
+    var fullHand = p.cards.concat(room.communityCards);
+    var evalResult = pokerLogic.evalHand(fullHand);
+    var score = rankWeights[evalResult] || 1;
+
+    if (score > bestRankValue) {
+      bestRankValue = score;
+      bestPlayer = p;
+      bestScoreDescription = evalResult;
+    }
+  });
+
+  bestPlayer.chips += room.pot;
+  room.dealerMessage = '🏆 ¡SHOWDOWN! ' + bestPlayer.name + ' gana $' + room.pot + ' con ' + bestScoreDescription + '!';
+  room.pot = 0;
+}
 
 function broadcastRoomState(roomId) {
   var room = multiplayerPokerRooms[roomId];
