@@ -625,6 +625,7 @@ io.on('connection', function(socket) {
       p.currentBet = 0;
       p.hasActed = false;
       p.folded = false;
+      p.lastHandEvaluation = null;
     });
 
     room.dealerMessage = '¡Mano iniciada! Turno de ' + room.players[0].name;
@@ -643,19 +644,18 @@ io.on('connection', function(socket) {
     var amount = parseInt(data.amount, 10) || 0;
 
     if (action === 'bet') {
-      if (amount <= 0) return; // Validación de monto positivo
+      if (amount <= 0) return;
 
-      // Calcular la apuesta máxima actual en la mesa antes de esta acción
       var maxCurrentBet = 0;
       room.players.forEach(function(p) {
         if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
       });
 
       var neededToCall = maxCurrentBet - currentPlayer.currentBet;
-      var totalInvestment = neededToCall + amount; // Lo necesario para igualar + lo que quiso subir libremente
+      var totalInvestment = neededToCall + amount;
 
       if (totalInvestment > currentPlayer.chips) {
-        totalInvestment = currentPlayer.chips; // All-in si no le alcanza
+        totalInvestment = currentPlayer.chips;
       }
 
       currentPlayer.chips -= totalInvestment;
@@ -663,7 +663,6 @@ io.on('connection', function(socket) {
       room.pot += totalInvestment;
       currentPlayer.hasActed = true;
 
-      // Si subió la apuesta por encima del máximo anterior, los demás deben volver a actuar
       if (currentPlayer.currentBet > maxCurrentBet) {
         room.players.forEach(function(p) {
           if (p.id !== currentPlayer.id && !p.folded) {
@@ -679,7 +678,6 @@ io.on('connection', function(socket) {
         if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
       });
 
-      // Si hay una apuesta pendiente en la mesa, el check actúa como igualar (call) o no se permite pasar libremente si hay deuda
       if (maxCurrentBet > currentPlayer.currentBet) {
         var neededToCall = maxCurrentBet - currentPlayer.currentBet;
         if (neededToCall > currentPlayer.chips) neededToCall = currentPlayer.chips;
@@ -700,7 +698,6 @@ io.on('connection', function(socket) {
 
     var activePlayers = room.players.filter(function(p) { return !p.folded; });
 
-    // Si queda un solo jugador activo, gana por retirada
     if (activePlayers.length === 1) {
       activePlayers[0].chips += room.pot;
       room.dealerMessage = '🏆 ¡' + activePlayers[0].name + ' gana el pozo de $' + room.pot + ' por retirada!';
@@ -710,24 +707,20 @@ io.on('connection', function(socket) {
       return;
     }
 
-    // Volver a calcular la apuesta máxima de la mesa
     var currentMaxBet = 0;
     activePlayers.forEach(function(p) {
       if (p.currentBet > currentMaxBet) currentMaxBet = p.currentBet;
     });
 
-    // Verificar si TODOS los jugadores activos ya actuaron Y sus apuestas están totalmente igualadas
     var allActed = activePlayers.every(function(p) { return p.hasActed; });
     var allBetsEqual = activePlayers.every(function(p) { return p.currentBet === currentMaxBet; });
 
     if (allActed && allBetsEqual) {
-      // ¡Ronda terminada! Ejecutar Showdown automáticamente para declarar ganador por la mano más alta
       triggerShowdown(room, activePlayers);
       broadcastRoomState(roomId);
       return;
     }
 
-    // Avanzar al siguiente jugador activo que no haya hecho fold
     var turnsChecked = 0;
     do {
       room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
@@ -752,33 +745,30 @@ io.on('connection', function(socket) {
   });
 });
 
-// Función que evalúa la mano más alta en el Showdown usando pokerLogic
+// Función de Showdown corregida usando evalBestHand para 7 cartas (Texas Hold'em)
 function triggerShowdown(room, activePlayers) {
   room.status = 'finished';
 
   var bestPlayer = activePlayers[0];
-  var bestScoreDescription = 'Combinación';
-  var bestRankValue = -1;
-
-  var rankWeights = {
-    'Carta Alta': 1, 'Par': 2, 'Doble Par': 3, 'Trio': 4, 
-    'Escalera': 5, 'Color': 6, 'Full House': 7, 'Poker': 8, 'Escalera de Color': 9
-  };
+  var bestScoreDescription = 'Carta Alta';
+  var highestScore = -1;
 
   activePlayers.forEach(function(p) {
-    var fullHand = p.cards.concat(room.communityCards);
-    var evalResult = pokerLogic.evalHand(fullHand);
-    var score = rankWeights[evalResult] || 1;
+    // Evalúa la mejor mano combinando las 2 cartas del jugador con las 5 comunitarias
+    var evaluation = pokerLogic.evalBestHand(p.cards, room.communityCards);
+    
+    // Almacenamos la combinación obtenida en el objeto del jugador
+    p.lastHandEvaluation = evaluation.name;
 
-    if (score > bestRankValue) {
-      bestRankValue = score;
+    if (evaluation.score > highestScore) {
+      highestScore = evaluation.score;
       bestPlayer = p;
-      bestScoreDescription = evalResult;
+      bestScoreDescription = evaluation.name;
     }
   });
 
   bestPlayer.chips += room.pot;
-  room.dealerMessage = '🏆 ¡SHOWDOWN! ' + bestPlayer.name + ' gana $' + room.pot + ' con ' + bestScoreDescription + '!';
+  room.dealerMessage = '🏆 ¡SHOWDOWN! ' + bestPlayer.name + ' gana el pozo de $' + room.pot + ' con ' + bestScoreDescription + '!';
   room.pot = 0;
 }
 
