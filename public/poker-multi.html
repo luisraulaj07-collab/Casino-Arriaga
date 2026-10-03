@@ -225,7 +225,14 @@
           var isTurn = (roomState.status === 'betting' && activePlayer && activePlayer.id === p.id);
           
           div.className = 'player-seat' + (isMe ? ' me' : '') + (isTurn ? ' active-turn' : '');
-          div.innerHTML = '<span><b>' + p.name + '</b>' + (p.folded ? ' (Retirado)' : '') + ' <small style="color:#b39b58;">(Apuesta: $' + p.currentBet + ')</small></span><span>$' + p.chips + '</span>';
+          
+          // Construir la descripción del estado del jugador en el asiento
+          var detailsText = p.folded ? ' (Retirado)' : ' (Apuesta: $' + p.currentBet + ')';
+          if (roomState.status === 'finished' && p.lastHandEvaluation && !p.folded) {
+              detailsText += ' — <b>' + p.lastHandEvaluation + '</b>';
+          }
+
+          div.innerHTML = '<span><b>' + p.name + '</b>' + detailsText + '</span><span>$' + p.chips + '</span>';
           el.playersList.appendChild(div);
 
           if (isMe) {
