@@ -644,18 +644,24 @@ io.on('connection', function(socket) {
     var amount = parseInt(data.amount, 10) || 0;
 
     if (action === 'bet') {
-      if (amount <= 0) return;
-
       var maxCurrentBet = 0;
       room.players.forEach(function(p) {
         if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
       });
 
       var neededToCall = maxCurrentBet - currentPlayer.currentBet;
-      var totalInvestment = neededToCall + amount;
+      var raiseAmount = amount > 0 ? amount : 0;
+
+      // Lógica precisa: Si hay deuda (neededToCall > 0), el jugador solo iguala a menos que especifique un raise adicional.
+      var totalInvestment = neededToCall;
+      if (neededToCall === 0) {
+        totalInvestment = raiseAmount > 0 ? raiseAmount : 50; // Apuesta mínima inicial por defecto si nadie ha apostado
+      } else if (raiseAmount > 0 && raiseAmount !== neededToCall) {
+        totalInvestment = neededToCall + raiseAmount;
+      }
 
       if (totalInvestment > currentPlayer.chips) {
-        totalInvestment = currentPlayer.chips;
+        totalInvestment = currentPlayer.chips; // All-in si no le alcanza
       }
 
       currentPlayer.chips -= totalInvestment;
@@ -666,12 +672,13 @@ io.on('connection', function(socket) {
       if (currentPlayer.currentBet > maxCurrentBet) {
         room.players.forEach(function(p) {
           if (p.id !== currentPlayer.id && !p.folded) {
-            p.hasActed = false;
+            p.hasActed = false; // Los demás deben volver a actuar si subieron la apuesta
           }
         });
+        room.dealerMessage = currentPlayer.name + ' subió la apuesta a $' + currentPlayer.currentBet;
+      } else {
+        room.dealerMessage = currentPlayer.name + ' igualó la apuesta ($' + totalInvestment + ')';
       }
-
-      room.dealerMessage = currentPlayer.name + ' apostó / subió $' + totalInvestment;
     } else if (action === 'check') {
       var maxCurrentBet = 0;
       room.players.forEach(function(p) {
@@ -721,6 +728,7 @@ io.on('connection', function(socket) {
       return;
     }
 
+    // Avanzar al siguiente jugador activo que no haya hecho fold
     var turnsChecked = 0;
     do {
       room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
@@ -745,7 +753,7 @@ io.on('connection', function(socket) {
   });
 });
 
-// Función de Showdown corregida usando evalBestHand para 7 cartas (Texas Hold'em)
+// Función de Showdown usando evalBestHand para 7 cartas (Texas Hold'em)
 function triggerShowdown(room, activePlayers) {
   room.status = 'finished';
 
@@ -754,10 +762,7 @@ function triggerShowdown(room, activePlayers) {
   var highestScore = -1;
 
   activePlayers.forEach(function(p) {
-    // Evalúa la mejor mano combinando las 2 cartas del jugador con las 5 comunitarias
     var evaluation = pokerLogic.evalBestHand(p.cards, room.communityCards);
-    
-    // Almacenamos la combinación obtenida en el objeto del jugador
     p.lastHandEvaluation = evaluation.name;
 
     if (evaluation.score > highestScore) {
