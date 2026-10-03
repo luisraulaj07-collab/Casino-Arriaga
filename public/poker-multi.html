@@ -138,7 +138,7 @@
 
     <div class="table-actions" id="gameControls" style="display:none; flex-direction:column; gap:4px;">
       <div style="display: flex; gap: 4px; align-items: center;">
-        <input type="number" id="customBetInput" value="50" min="10" step="10" style="flex:1; padding:6px; border-radius:6px; border:1px solid #b39b58; background:#0d281f; color:#fff; text-align:center; font-weight:bold;" placeholder="Monto a apostar">
+        <input type="number" id="customBetInput" value="50" min="10" step="10" style="flex:1; padding:6px; border-radius:6px; border:1px solid #b39b58; background:#0d281f; color:#fff; text-align:center; font-weight:bold;" placeholder="Monto extra a subir">
       </div>
       <div class="table-actions" style="margin-top:0;">
         <button id="betBtn" style="background-color:#4caf50; color:#fff;">Apostar / Subir</button>
@@ -219,6 +219,12 @@
       var myTurn = false;
       var activePlayer = roomState.players[roomState.currentTurnIndex];
 
+      // Calcular la apuesta máxima actual de la mesa
+      var maxCurrentBet = 0;
+      roomState.players.forEach(function(p) {
+          if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
+      });
+
       roomState.players.forEach(function(p) {
           var div = document.createElement('div');
           var isMe = (p.id === socket.id);
@@ -226,7 +232,6 @@
           
           div.className = 'player-seat' + (isMe ? ' me' : '') + (isTurn ? ' active-turn' : '');
           
-          // Construir la descripción del estado del jugador en el asiento
           var detailsText = p.folded ? ' (Retirado)' : ' (Apuesta: $' + p.currentBet + ')';
           if (roomState.status === 'finished' && p.lastHandEvaluation && !p.folded) {
               detailsText += ' — <b>' + p.lastHandEvaluation + '</b>';
@@ -239,6 +244,14 @@
               el.myChips.textContent = '$' + p.chips;
               if (isTurn && roomState.status === 'betting') myTurn = true;
               
+              // Actualizar texto dinámico del botón de apuesta según la deuda pendiente
+              var neededToCall = maxCurrentBet - p.currentBet;
+              if (neededToCall > 0) {
+                  el.betBtn.textContent = 'Igualar ($' + neededToCall + ')';
+              } else {
+                  el.betBtn.textContent = 'Apostar / Subir';
+              }
+
               // Renderizar tus cartas personales
               el.myCardsContainer.innerHTML = '';
               if (p.cards && p.cards.length > 0) {
@@ -284,7 +297,7 @@
   });
 
   el.betBtn.addEventListener('click', function() {
-      var userAmount = parseInt(el.customBetInput.value, 10) || 50;
+      var userAmount = parseInt(el.customBetInput.value, 10) || 0;
       socket.emit('player_action', { roomId: 'mesa_poker_1', action: 'bet', amount: userAmount });
   });
 
