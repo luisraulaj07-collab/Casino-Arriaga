@@ -643,6 +643,8 @@ io.on('connection', function(socket) {
     var amount = parseInt(data.amount, 10) || 0;
 
     if (action === 'bet') {
+      if (amount <= 0) return; // Validación de monto positivo
+
       // Calcular la apuesta máxima actual en la mesa antes de esta acción
       var maxCurrentBet = 0;
       room.players.forEach(function(p) {
@@ -650,10 +652,10 @@ io.on('connection', function(socket) {
       });
 
       var neededToCall = maxCurrentBet - currentPlayer.currentBet;
-      var totalInvestment = neededToCall + amount;
+      var totalInvestment = neededToCall + amount; // Lo necesario para igualar + lo que quiso subir libremente
 
       if (totalInvestment > currentPlayer.chips) {
-        totalInvestment = currentPlayer.chips; // All-in si no alcanza
+        totalInvestment = currentPlayer.chips; // All-in si no le alcanza
       }
 
       currentPlayer.chips -= totalInvestment;
@@ -661,16 +663,34 @@ io.on('connection', function(socket) {
       room.pot += totalInvestment;
       currentPlayer.hasActed = true;
 
-      // ¡IMPORTANTE! Si alguien sube la apuesta, los demás jugadores deben volver a actuar
-      room.players.forEach(function(p) {
-        if (p.id !== currentPlayer.id && !p.folded) {
-          p.hasActed = false;
-        }
-      });
+      // Si subió la apuesta por encima del máximo anterior, los demás deben volver a actuar
+      if (currentPlayer.currentBet > maxCurrentBet) {
+        room.players.forEach(function(p) {
+          if (p.id !== currentPlayer.id && !p.folded) {
+            p.hasActed = false;
+          }
+        });
+      }
 
       room.dealerMessage = currentPlayer.name + ' apostó / subió $' + totalInvestment;
     } else if (action === 'check') {
-      room.dealerMessage = currentPlayer.name + ' pasó (Check).';
+      var maxCurrentBet = 0;
+      room.players.forEach(function(p) {
+        if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
+      });
+
+      // Si hay una apuesta pendiente en la mesa, el check actúa como igualar (call) o no se permite pasar libremente si hay deuda
+      if (maxCurrentBet > currentPlayer.currentBet) {
+        var neededToCall = maxCurrentBet - currentPlayer.currentBet;
+        if (neededToCall > currentPlayer.chips) neededToCall = currentPlayer.chips;
+        
+        currentPlayer.chips -= neededToCall;
+        currentPlayer.currentBet += neededToCall;
+        room.pot += neededToCall;
+        room.dealerMessage = currentPlayer.name + ' igualó por valor de $' + neededToCall;
+      } else {
+        room.dealerMessage = currentPlayer.name + ' pasó (Check).';
+      }
       currentPlayer.hasActed = true;
     } else if (action === 'fold') {
       currentPlayer.folded = true;
@@ -701,7 +721,7 @@ io.on('connection', function(socket) {
     var allBetsEqual = activePlayers.every(function(p) { return p.currentBet === currentMaxBet; });
 
     if (allActed && allBetsEqual) {
-      // ¡Ronda terminada! Ejecutar Showdown para declarar ganador por la mano más alta
+      // ¡Ronda terminada! Ejecutar Showdown automáticamente para declarar ganador por la mano más alta
       triggerShowdown(room, activePlayers);
       broadcastRoomState(roomId);
       return;
