@@ -136,10 +136,15 @@
       <button id="startBtn" style="width:100%; background-color:#b39b58; color:#0d281f;">Iniciar / Siguiente Mano</button>
     </div>
 
-    <div class="table-actions" id="gameControls" style="display:none;">
-      <button id="betBtn" style="background-color:#4caf50; color:#fff;">Apostar / Igualar</button>
-      <button id="checkBtn" style="background-color:#ff9800; color:#fff;">Pasar (Check)</button>
-      <button id="foldBtn" style="background-color:#f44336; color:#fff;">Retirarse</button>
+    <div class="table-actions" id="gameControls" style="display:none; flex-direction:column; gap:4px;">
+      <div style="display: flex; gap: 4px; align-items: center;">
+        <input type="number" id="customBetInput" value="50" min="10" step="10" style="flex:1; padding:6px; border-radius:6px; border:1px solid #b39b58; background:#0d281f; color:#fff; text-align:center; font-weight:bold;" placeholder="Monto a apostar">
+      </div>
+      <div class="table-actions" style="margin-top:0;">
+        <button id="betBtn" style="background-color:#4caf50; color:#fff;">Apostar / Subir</button>
+        <button id="checkBtn" style="background-color:#ff9800; color:#fff;">Pasar (Check)</button>
+        <button id="foldBtn" style="background-color:#f44336; color:#fff;">Retirarse</button>
+      </div>
     </div>
 
     <a class="lobby-link" href="index.html" style="display:block; text-align:center; margin-top:10px; font-size:12px;">← Volver a la mesa principal</a>
@@ -167,6 +172,7 @@
     startBtn: document.getElementById('startBtn'),
     waitingControls: document.getElementById('waitingControls'),
     gameControls: document.getElementById('gameControls'),
+    customBetInput: document.getElementById('customBetInput'),
     betBtn: document.getElementById('betBtn'),
     checkBtn: document.getElementById('checkBtn'),
     foldBtn: document.getElementById('foldBtn')
@@ -213,12 +219,6 @@
       var myTurn = false;
       var activePlayer = roomState.players[roomState.currentTurnIndex];
 
-      // Calcular la apuesta máxima actual de la mesa para el botón dinámico
-      var maxCurrentBet = 0;
-      roomState.players.forEach(function(p) {
-          if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
-      });
-
       roomState.players.forEach(function(p) {
           var div = document.createElement('div');
           var isMe = (p.id === socket.id);
@@ -232,14 +232,6 @@
               el.myChips.textContent = '$' + p.chips;
               if (isTurn && roomState.status === 'betting') myTurn = true;
               
-              // Actualizar texto dinámico del botón de apuesta según lo que deba pagar
-              var neededToCall = maxCurrentBet - p.currentBet;
-              if (neededToCall > 0) {
-                  el.betBtn.textContent = 'Igualar ($' + neededToCall + ') + $50';
-              } else {
-                  el.betBtn.textContent = 'Apostar $50';
-              }
-
               // Renderizar tus cartas personales
               el.myCardsContainer.innerHTML = '';
               if (p.cards && p.cards.length > 0) {
@@ -285,7 +277,8 @@
   });
 
   el.betBtn.addEventListener('click', function() {
-      socket.emit('player_action', { roomId: 'mesa_poker_1', action: 'bet', amount: 50 });
+      var userAmount = parseInt(el.customBetInput.value, 10) || 50;
+      socket.emit('player_action', { roomId: 'mesa_poker_1', action: 'bet', amount: userAmount });
   });
 
   el.checkBtn.addEventListener('click', function() {
