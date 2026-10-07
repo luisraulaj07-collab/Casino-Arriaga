@@ -575,7 +575,8 @@ const multiplayerPokerRooms = {};
 io.on('connection', function(socket) {
   console.log('Cliente conectado por WebSockets:', socket.id);
 
-  socket.on('join_multiplayer_table', function(data) {
+  // Unirse a la mesa usando el balance real de la base de datos
+  socket.on('join_multiplayer_table', async function(data) {
     var roomId = data.roomId || 'mesa_poker_1';
     socket.join(roomId);
 
@@ -592,13 +593,30 @@ io.on('connection', function(socket) {
     }
 
     var room = multiplayerPokerRooms[roomId];
-    var existingPlayer = room.players.find(function(p) { return p.id === socket.id; });
+    var existingPlayer = room.players.find(function(p) { return p.socketId === socket.id; });
     
     if (!existingPlayer) {
+      // Intentar obtener el usuario real de la BD usando Telegram ID si viene en los datos, o crear uno temporal
+      var tgId = data.telegramId ? parseInt(data.telegramId, 10) : null;
+      var userRecord = null;
+
+      try {
+        if (tgId) {
+          userRecord = await getUser(tgId);
+        }
+      } catch (err) {
+        console.error('Error buscando usuario para póker:', err);
+      }
+
+      var initialChips = userRecord ? userRecord.balance : (data.chips || 1000);
+      var realTelegramId = userRecord ? userRecord.telegram_id : (tgId || socket.id);
+
       room.players.push({
-        id: socket.id,
-        name: data.name || 'Jugador',
-        chips: data.chips || 1000,
+        socketId: socket.id,
+        telegramId: realTelegramId,
+        name: data.name || (userRecord ? userRecord.first_name : 'Jugador'),
+        chips: initialChips,
+        initialHandChips: initialChips, // Para calcular la diferencia al salir o terminar
         currentBet: 0,
         hasActed: false,
         cards: [],
@@ -614,7 +632,6 @@ io.on('connection', function(socket) {
     var room = multiplayerPokerRooms[roomId];
     if (!room || room.players.length < 2) return;
 
-    // BLOQUEO DE SEGURIDAD: Evita que reinicien o skipeen la mano si las apuestas están en curso
     if (room.status === 'betting') {
       socket.emit('error_message', 'No se puede iniciar una nueva mano mientras la partida actual está en curso.');
       return;
@@ -622,7 +639,7 @@ io.on('connection', function(socket) {
 
     room.deck = pokerLogic.freshDeck();
     room.pot = 0;
-    room.communityCards = room.deck.splice(0, 5); // 5 cartas comunitarias listas
+    room.communityCards = room.deck.splice(0, 5);
     room.status = 'betting';
     room.currentTurnIndex = 0;
 
@@ -644,7 +661,7 @@ io.on('connection', function(socket) {
     if (!room || room.status !== 'betting') return;
 
     var currentPlayer = room.players[room.currentTurnIndex];
-    if (!currentPlayer || currentPlayer.id !== socket.id) return;
+    if (!currentPlayer || currentPlayer.socketId !== socket.id) return;
 
     var action = data.action; // 'bet', 'check', 'fold'
     var amount = parseInt(data.amount, 10) || 0;
@@ -676,7 +693,7 @@ io.on('connection', function(socket) {
 
       if (currentPlayer.currentBet > maxCurrentBet) {
         room.players.forEach(function(p) {
-          if (p.id !== currentPlayer.id && !p.folded) {
+          if (p.socketId !== currentPlayer.socketId && !p.folded) {
             p.hasActed = false; 
           }
         });
@@ -715,6 +732,10 @@ io.on('connection', function(socket) {
       room.dealerMessage = '🏆 ¡' + activePlayers[0].name + ' gana el pozo de $' + room.pot + ' por retirada!';
       room.status = 'finished';
       room.pot = 0;
+
+      // Sincronizar cambios con la base de datos para todos los jugadores de la mesa
+      sincronizarSaldosBD(room);
+
       broadcastRoomState(roomId);
       return;
     }
@@ -729,6 +750,10 @@ io.on('connection', function(socket) {
 
     if (allActed && allBetsEqual) {
       triggerShowdown(room, activePlayers);
+      
+      // Sincronizar cambios con la base de datos para todos los jugadores de la mesa
+      sincronizarSaldosBD(room);
+
       broadcastRoomState(roomId);
       return;
     }
@@ -742,12 +767,26 @@ io.on('connection', function(socket) {
     broadcastRoomState(roomId);
   });
 
-  socket.on('disconnect', function() {
+  socket.on('disconnect', async function() {
     console.log('Cliente desconectado de WebSockets:', socket.id);
     for (var roomId in multiplayerPokerRooms) {
       var room = multiplayerPokerRooms[roomId];
       var initialLength = room.players.length;
-      room.players = room.players.filter(function(p) { return p.id !== socket.id; });
+      
+      // Guardar saldo final en BD antes de sacarlo de la sala si estaba participando
+      var leavingPlayer = room.players.find(function(p) { return p.socketId === socket.id; });
+      if (leavingPlayer && typeof leavingPlayer.telegramId === 'number') {
+        var diff = leavingPlayer.chips - leavingPlayer.initialHandChips;
+        if (diff !== 0) {
+          try {
+            await applyDelta(leavingPlayer.telegramId, diff, 'poker', 'Retiro de mesa multijugador');
+          } catch (e) {
+            console.error('Error al guardar saldo al desconectar:', e);
+          }
+        }
+      }
+
+      room.players = room.players.filter(function(p) { return p.socketId !== socket.id; });
       
       if (room.players.length !== initialLength) {
         if (room.players.length < 2) room.status = 'waiting';
@@ -757,6 +796,26 @@ io.on('connection', function(socket) {
   });
 });
 
+// Función para actualizar las ganancias/pérdidas netas en la base de datos
+async function sincronizarSaldosBD(room) {
+  for (var i = 0; i < room.players.length; i++) {
+    var p = room.players[i];
+    if (typeof p.telegramId === 'number') {
+      var diferencia = p.chips - p.initialHandChips;
+      if (diferencia !== 0) {
+        try {
+          await applyDelta(p.telegramId, diferencia, 'poker', 'Resultado de mano de póker multijugador');
+        } catch (err) {
+          console.error('Error aplicando delta en póker para usuario ' + p.telegramId + ':', err);
+        }
+      }
+      // Actualizar el punto de partida para la siguiente mano
+      p.initialHandChips = p.chips;
+    }
+  }
+}
+
+// Función de Showdown usando evalBestHand para 7 cartas (Texas Hold'em)
 function triggerShowdown(room, activePlayers) {
   room.status = 'finished';
 
