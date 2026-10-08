@@ -244,4 +244,596 @@ function spinWheel() {
 
 app.post('/api/roulette/spin', requireTelegramUser, async function (req, res) {
   try {
-    var u = await getOrCreateUser
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var betType = req.body.betType;
+    var number = parseInt(req.body.number, 10);
+    var amount = parseInt(req.body.amount, 10);
+    if (!amount || amount <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+    if (amount > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
+    if (betType === 'numero' && (isNaN(number) || number < 0 || number > 36)) return res.status(400).json({ error: 'Número inválido.' });
+
+    var winNumber = spinWheel();
+    var c = colorOf(winNumber);
+    var win = false, mult = 0;
+    if (betType === 'rojo') { win = c === 'red'; mult = 2; }
+    else if (betType === 'negro') { win = c === 'black'; mult = 2; }
+    else if (betType === 'numero') { win = number === winNumber; mult = (number === 0) ? 10 : 5; }
+    else return res.status(400).json({ error: 'Tipo de apuesta inválido.' });
+
+    var delta = win ? amount * (mult - 1) : -amount;
+    var newBalance = await applyDelta(req.tgUser.id, delta, 'ruleta', 'Salió ' + winNumber + ' (' + c + ')');
+
+    res.json({ winNumber: winNumber, color: c, win: win, delta: delta, balance: newBalance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- VIDEO PÓKER (Jacks or Better) ----------
+const activePokerGames = {};
+
+app.post('/api/videopoker/deal', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var betAmount = parseInt(req.body.bet, 10);
+
+    if (!betAmount || betAmount <= 0) {
+      return res.status(400).json({ error: 'Apuesta inválida.' });
+    }
+    if (betAmount > u.balance) {
+      return res.status(400).json({ error: 'Saldo insuficiente.' });
+    }
+
+    var newBalance = await applyDelta(req.tgUser.id, -betAmount, 'videopoker', 'Apuesta Video Póker');
+
+    var deck = pokerLogic.freshDeck();
+    var hand = deck.splice(0, 5);
+
+    activePokerGames[req.tgUser.id] = {
+      deck: deck,
+      hand: hand,
+      bet: betAmount
+    };
+
+    res.json({
+      hand: hand,
+      balance: newBalance
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/videopoker/draw', requireTelegramUser, async function (req, res) {
+  try {
+    var session = activePokerGames[req.tgUser.id];
+    if (!session) {
+      return res.status(400).json({ error: 'No hay una partida de póker activa.' });
+    }
+
+    var hand = session.hand;
+    var deck = session.deck;
+    var holds = req.body.holds || [false, false, false, false, false];
+
+    for (let i = 0; i < 5; i++) {
+      if (!holds[i]) {
+        if (deck.length > 0) {
+          hand[i] = deck.pop();
+        }
+      }
+    }
+
+    var resultType = pokerLogic.evalHand(hand);
+    var multiplier = pokerLogic.PAY_TABLE[resultType] || 0;
+    var winnings = session.bet * multiplier;
+    var delta = winnings - session.bet;
+
+    var finalBalance;
+    if (delta !== 0) {
+      finalBalance = await applyDelta(req.tgUser.id, delta, 'videopoker', 'Premio Video Póker (' + resultType + ')');
+    } else {
+      finalBalance = (await getUser(req.tgUser.id)).balance;
+    }
+
+    delete activePokerGames[req.tgUser.id];
+
+    res.json({
+      hand: hand,
+      result: resultType,
+      mult: multiplier,
+      delta: delta,
+      balance: finalBalance
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- MINAS ----------
+const minasSessions = {}; 
+
+app.post('/api/minas/state', requireTelegramUser, async function (req, res) {
+  try {
+    var session = minasSessions[req.tgUser.id];
+    if (!session) return res.json({ active: false });
+    res.json(Object.assign({ active: true }, session.publicState()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/minas/start', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var bet = parseInt(req.body.bet, 10);
+    var minesCount = parseInt(req.body.mines, 10);
+
+    if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+    if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
+    if (minasLogic.ALLOWED_MINES.indexOf(minesCount) === -1) return res.status(400).json({ error: 'Cantidad de minas inválida.' });
+
+    var newBalance = await applyDelta(req.tgUser.id, -bet, 'minas', 'Apuesta inicial de Minas');
+
+    var bombs = minasLogic.pickBombs(minesCount);
+    var session = {
+      bet: bet,
+      minesCount: minesCount,
+      bombs: bombs,
+      revealed: [],
+      mult: 1,
+      publicState: function() {
+        return { revealed: this.revealed, mult: this.mult, bet: this.bet, minesCount: this.minesCount };
+      }
+    };
+    minasSessions[req.tgUser.id] = session;
+
+    res.json(Object.assign(session.publicState(), { balance: newBalance }));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/minas/reveal', requireTelegramUser, async function (req, res) {
+  try {
+    var session = minasSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una partida activa.' });
+    var index = parseInt(req.body.index, 10);
+    if (isNaN(index) || index < 0 || index >= minasLogic.N) return res.status(400).json({ error: 'Casilla inválida.' });
+    if (session.revealed.indexOf(index) !== -1) return res.status(400).json({ error: 'Casilla ya destapada.' });
+
+    if (session.bombs.indexOf(index) !== -1) {
+      var bombs = session.bombs;
+      delete minasSessions[req.tgUser.id];
+      var u = await getUser(req.tgUser.id);
+      return res.json({ status: 'lose', bombs: bombs, balance: u.balance });
+    }
+
+    session.revealed.push(index);
+    var k = session.revealed.length;
+    session.mult = minasLogic.multiplier(k, session.minesCount);
+
+    if (k === minasLogic.N - session.minesCount) {
+      var payout = Math.floor(session.bet * session.mult);
+      var newBalance = await applyDelta(req.tgUser.id, payout, 'minas', 'Tablero limpiado en Minas');
+      var bombs = session.bombs;
+      delete minasSessions[req.tgUser.id];
+      return res.json({ status: 'clear', mult: session.mult, payout: payout, bombs: bombs, balance: newBalance });
+    }
+
+    var u = await getUser(req.tgUser.id);
+    res.json({ status: 'playing', mult: session.mult, balance: u.balance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/minas/cashout', requireTelegramUser, async function (req, res) {
+  try {
+    var session = minasSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una partida activa.' });
+    if (session.revealed.length === 0) return res.status(400).json({ error: 'Debes destapar al menos una casilla.' });
+
+    var payout = Math.floor(session.bet * session.mult);
+    var newBalance = await applyDelta(req.tgUser.id, payout, 'minas', 'Cobro exitoso en Minas (x' + session.mult.toFixed(2) + ')');
+    var bombs = session.bombs;
+    delete minasSessions[req.tgUser.id];
+
+    res.json({ mult: session.mult, payout: payout, bombs: bombs, balance: newBalance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- HI-LO ----------
+const hiloSessions = {}; 
+
+app.post('/api/hilo/state', requireTelegramUser, async function (req, res) {
+  try {
+    var session = hiloSessions[req.tgUser.id];
+    if (!session) return res.json({ active: false });
+    res.json(Object.assign({ active: true }, session.publicState()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/hilo/start', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var bet = parseInt(req.body.bet, 10);
+    if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
+    if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
+
+    var newBalance = await applyDelta(req.tgUser.id, -bet, 'hilo', 'Apuesta inicial Hi-Lo');
+    var deck = hiloLogic.freshDeck();
+    var current = deck.pop();
+
+    var session = {
+      bet: bet,
+      deck: deck,
+      current: current,
+      rounds: 0,
+      pCum: 1,
+      publicState: function() {
+        var pHigh = hiloLogic.probGuess(this.deck, this.current.val, 'higher');
+        var pLow = hiloLogic.probGuess(this.deck, this.current.val, 'lower');
+        var pEqual = hiloLogic.probGuess(this.deck, this.current.val, 'equal');
+
+        var multH = pHigh > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pHigh) : null;
+        var multL = pLow > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pLow) : null;
+        var multE = pEqual > 0 ? hiloLogic.TARGET_RTP / (this.pCum * pEqual) : null;
+
+        var cashoutMult = this.rounds > 0 ? (this.pCum > 0 ? hiloLogic.TARGET_RTP / this.pCum : 1) : 0;
+        return {
+          current: this.current,
+          rounds: this.rounds,
+          higherGain: multH ? Math.floor(this.bet * multH) - this.bet : null,
+          lowerGain: multL ? Math.floor(this.bet * multL) - this.bet : null,
+          equalGain: multE ? Math.floor(this.bet * multE) - this.bet : null,
+          cashoutGain: Math.floor(this.bet * cashoutMult)
+        };
+      }
+    };
+    hiloSessions[req.tgUser.id] = session;
+
+    res.json(Object.assign({ balance: newBalance }, session.publicState()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/hilo/guess', requireTelegramUser, async function (req, res) {
+  try {
+    var session = hiloSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una partida de Hi-Lo activa.' });
+    var guess = req.body.guess;
+    if (guess !== 'higher' && guess !== 'lower' && guess !== 'equal') {
+      return res.status(400).json({ error: 'Adivinanza inválida.' });
+    }
+
+    if (session.deck.length === 0) {
+      delete hiloSessions[req.tgUser.id];
+      return res.status(400).json({ error: 'El mazo se ha agotado.' });
+    }
+
+    var pRound = hiloLogic.probGuess(session.deck, session.current.val, guess);
+    if (pRound <= 0) return res.status(400).json({ error: 'Apuesta imposible con la carta actual.' });
+
+    var nextIndex = Math.floor(Math.random() * session.deck.length);
+    var nextCard = session.deck.splice(nextIndex, 1)[0];
+
+    var isWin = false;
+    if (guess === 'higher') isWin = nextCard.val > session.current.val;
+    else if (guess === 'lower') isWin = nextCard.val < session.current.val;
+    else if (guess === 'equal') isWin = nextCard.val === session.current.val;
+
+    if (!isWin) {
+      delete hiloSessions[req.tgUser.id];
+      var u = await getUser(req.tgUser.id);
+      return res.json({ status: 'lose', nextCard: nextCard, balance: u.balance });
+    }
+
+    session.rounds++;
+    session.pCum *= pRound;
+    session.current = nextCard;
+
+    if (session.deck.length === 0) {
+      var mult = hiloLogic.TARGET_RTP / session.pCum;
+      var payout = Math.floor(session.bet * mult);
+      var newBalance = await applyDelta(req.tgUser.id, payout, 'hilo', 'Mazo terminado en Hi-Lo');
+      delete hiloSessions[req.tgUser.id];
+      return res.json({ status: 'autocash', nextCard: nextCard, balance: newBalance, payout: payout });
+    }
+
+    var u = await getUser(req.tgUser.id);
+    res.json(Object.assign({ status: 'win', nextCard: nextCard, balance: u.balance }, session.publicState()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/hilo/cashout', requireTelegramUser, async function (req, res) {
+  try {
+    var session = hiloSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una partida de Hi-Lo activa.' });
+    if (session.rounds === 0) return res.status(400).json({ error: 'Debes acertar al menos una vez para cobrar.' });
+
+    var mult = hiloLogic.TARGET_RTP / session.pCum;
+    var payout = Math.floor(session.bet * mult);
+    var newBalance = await applyDelta(req.tgUser.id, payout, 'hilo', 'Cobro exitoso en Hi-Lo');
+    delete hiloSessions[req.tgUser.id];
+
+    res.json({ payout: payout, balance: newBalance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- GESTIÓN DE WEBSOCKETS (PÓKER MULTIJUGADOR) ----------
+const multiplayerPokerRooms = {};
+
+io.on('connection', function(socket) {
+  console.log('Cliente conectado por WebSockets:', socket.id);
+
+  socket.on('join_multiplayer_table', async function(data) {
+    var roomId = data.roomId || 'mesa_poker_1';
+    socket.join(roomId);
+
+    if (!multiplayerPokerRooms[roomId]) {
+      multiplayerPokerRooms[roomId] = {
+        players: [],
+        deck: [],
+        communityCards: [],
+        pot: 0,
+        currentTurnIndex: 0,
+        status: 'waiting', 
+        dealerMessage: 'Esperando jugadores...'
+      };
+    }
+
+    var room = multiplayerPokerRooms[roomId];
+    var existingPlayer = room.players.find(function(p) { return p.id === socket.id; });
+    
+    if (!existingPlayer) {
+      var tgId = data.telegramId ? parseInt(data.telegramId, 10) : null;
+      var userRecord = null;
+
+      try {
+        if (tgId) {
+          userRecord = await getUser(tgId);
+        }
+      } catch (err) {
+        console.error('Error buscando usuario para póker:', err);
+      }
+
+      var initialChips = userRecord ? userRecord.balance : (data.chips || 1000);
+      var realTelegramId = userRecord ? userRecord.telegram_id : tgId;
+
+      room.players.push({
+        id: socket.id,
+        telegramId: realTelegramId,
+        name: data.name || (userRecord ? userRecord.first_name : 'Jugador'),
+        chips: initialChips,
+        initialHandChips: initialChips,
+        currentBet: 0,
+        hasActed: false,
+        cards: [],
+        folded: false
+      });
+    }
+
+    broadcastRoomState(roomId);
+  });
+
+  socket.on('start_hand', function(data) {
+    var roomId = data.roomId || 'mesa_poker_1';
+    var room = multiplayerPokerRooms[roomId];
+    if (!room || room.players.length < 2) return;
+
+    if (room.status === 'betting') {
+      socket.emit('error_message', 'No se puede iniciar una nueva mano mientras la partida actual está en curso.');
+      return;
+    }
+
+    room.deck = pokerLogic.freshDeck();
+    room.pot = 0;
+    room.communityCards = room.deck.splice(0, 5);
+    room.status = 'betting';
+    room.currentTurnIndex = 0;
+
+    room.players.forEach(function(p) {
+      p.cards = [room.deck.pop(), room.deck.pop()];
+      p.currentBet = 0;
+      p.hasActed = false;
+      p.folded = false;
+      p.lastHandEvaluation = null;
+    });
+
+    room.dealerMessage = '¡Mano iniciada! Turno de ' + room.players[0].name;
+    broadcastRoomState(roomId);
+  });
+
+  socket.on('player_action', function(data) {
+    var roomId = data.roomId || 'mesa_poker_1';
+    var room = multiplayerPokerRooms[roomId];
+    if (!room || room.status !== 'betting') return;
+
+    var currentPlayer = room.players[room.currentTurnIndex];
+    if (!currentPlayer || currentPlayer.id !== socket.id) return;
+
+    var action = data.action; 
+    var amount = parseInt(data.amount, 10) || 0;
+
+    if (action === 'bet') {
+      var maxCurrentBet = 0;
+      room.players.forEach(function(p) {
+        if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
+      });
+
+      var neededToCall = maxCurrentBet - currentPlayer.currentBet;
+      var raiseAmount = amount > 0 ? amount : 0;
+
+      var totalInvestment = neededToCall;
+      if (neededToCall === 0) {
+        totalInvestment = raiseAmount > 0 ? raiseAmount : 50; 
+      } else if (raiseAmount > 0 && raiseAmount !== neededToCall) {
+        totalInvestment = neededToCall + raiseAmount;
+      }
+
+      if (totalInvestment > currentPlayer.chips) {
+        totalInvestment = currentPlayer.chips; 
+      }
+
+      currentPlayer.chips -= totalInvestment;
+      currentPlayer.currentBet += totalInvestment;
+      room.pot += totalInvestment;
+      currentPlayer.hasActed = true;
+
+      if (currentPlayer.currentBet > maxCurrentBet) {
+        room.players.forEach(function(p) {
+          if (p.id !== currentPlayer.id && !p.folded) {
+            p.hasActed = false; 
+          }
+        });
+        room.dealerMessage = currentPlayer.name + ' subió la apuesta a $' + currentPlayer.currentBet;
+      } else {
+        room.dealerMessage = currentPlayer.name + ' igualó la apuesta ($' + totalInvestment + ')';
+      }
+    } else if (action === 'check') {
+      var maxCurrentBet = 0;
+      room.players.forEach(function(p) {
+        if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
+      });
+
+      if (maxCurrentBet > currentPlayer.currentBet) {
+        var neededToCall = maxCurrentBet - currentPlayer.currentBet;
+        if (neededToCall > currentPlayer.chips) neededToCall = currentPlayer.chips;
+        
+        currentPlayer.chips -= neededToCall;
+        currentPlayer.currentBet += neededToCall;
+        room.pot += neededToCall;
+        room.dealerMessage = currentPlayer.name + ' igualó por valor de $' + neededToCall;
+      } else {
+        room.dealerMessage = currentPlayer.name + ' pasó (Check).';
+      }
+      currentPlayer.hasActed = true;
+    } else if (action === 'fold') {
+      currentPlayer.folded = true;
+      currentPlayer.hasActed = true;
+      room.dealerMessage = currentPlayer.name + ' se retiró.';
+    }
+
+    var activePlayers = room.players.filter(function(p) { return !p.folded; });
+
+    if (activePlayers.length === 1) {
+      activePlayers[0].chips += room.pot;
+      room.dealerMessage = '🏆 ¡' + activePlayers[0].name + ' gana el pozo de $' + room.pot + ' por retirada!';
+      room.status = 'finished';
+      room.pot = 0;
+
+      sincronizarSaldosBD(room);
+      broadcastRoomState(roomId);
+      return;
+    }
+
+    var currentMaxBet = 0;
+    activePlayers.forEach(function(p) {
+      if (p.currentBet > currentMaxBet) currentMaxBet = p.currentBet;
+    });
+
+    var allActed = activePlayers.every(function(p) { return p.hasActed; });
+    var allBetsEqual = activePlayers.every(function(p) { return p.currentBet === currentMaxBet; });
+
+    if (allActed && allBetsEqual) {
+      triggerShowdown(room, activePlayers);
+      sincronizarSaldosBD(room);
+      broadcastRoomState(roomId);
+      return;
+    }
+
+    var turnsChecked = 0;
+    do {
+      room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+      turnsChecked++;
+    } while (room.players[room.currentTurnIndex].folded && turnsChecked < room.players.length);
+
+    broadcastRoomState(roomId);
+  });
+
+  socket.on('disconnect', async function() {
+    console.log('Cliente desconectado de WebSockets:', socket.id);
+    for (var roomId in multiplayerPokerRooms) {
+      var room = multiplayerPokerRooms[roomId];
+      var initialLength = room.players.length;
+      
+      var leavingPlayer = room.players.find(function(p) { return p.id === socket.id; });
+      if (leavingPlayer && typeof leavingPlayer.telegramId === 'number') {
+        var diff = leavingPlayer.chips - leavingPlayer.initialHandChips;
+        if (diff !== 0) {
+          try {
+            await applyDelta(leavingPlayer.telegramId, diff, 'poker', 'Retiro de mesa multijugador');
+          } catch (e) {
+            console.error('Error al guardar saldo al desconectar:', e);
+          }
+        }
+      }
+
+      room.players = room.players.filter(function(p) { return p.id !== socket.id; });
+      
+      if (room.players.length !== initialLength) {
+        if (room.players.length < 2) room.status = 'waiting';
+        broadcastRoomState(roomId);
+      }
+    }
+  });
+});
+
+async function sincronizarSaldosBD(room) {
+  for (var i = 0; i < room.players.length; i++) {
+    var p = room.players[i];
+    if (typeof p.telegramId === 'number') {
+      var diferencia = p.chips - p.initialHandChips;
+      if (diferencia !== 0) {
+        try {
+          await applyDelta(p.telegramId, diferencia, 'poker', 'Resultado de mano de póker multijugador');
+        } catch (err) {
+          console.error('Error aplicando delta en póker para usuario ' + p.telegramId + ':', err);
+        }
+      }
+      p.initialHandChips = p.chips;
+    }
+  }
+}
+
+function triggerShowdown(room, activePlayers) {
+  room.status = 'finished';
+
+  var bestPlayer = activePlayers[0];
+  var bestScoreDescription = 'Carta Alta';
+  var highestScore = -1;
+
+  activePlayers.forEach(function(p) {
+    var evaluation = pokerLogic.evalBestHand(p.cards, room.communityCards);
+    p.lastHandEvaluation = evaluation.name;
+
+    if (evaluation.score > highestScore) {
+      highestScore = evaluation.score;
+      bestPlayer = p;
+      bestScoreDescription = evaluation.name;
+    }
+  });
+
+  bestPlayer.chips += room.pot;
+  room.dealerMessage = '🏆 ¡SHOWDOWN! ' + bestPlayer.name + ' gana el pozo de $' + room.pot + ' con ' + bestScoreDescription + '!';
+  room.pot = 0;
+}
+
+function broadcastRoomState(roomId) {
+  var room = multiplayerPokerRooms[roomId];
+  if (!room) return;
+  io.to(roomId).emit('update_multiplayer_table', room);
+}
+
+server.listen(PORT, function () {
+  console.log('Casino con soporte multijugador corriendo en el puerto ' + PORT);
+});
