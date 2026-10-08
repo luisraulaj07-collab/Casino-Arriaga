@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const http = http = require('http');
+const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const { getOrCreateUser, getUser, listUsers, applyDelta } = require('./db');
@@ -8,7 +8,7 @@ const { verifyInitData } = require('./telegramAuth');
 const pokerLogic = require('./pokerLogic');
 const minasLogic = require('./minas');
 const hiloLogic = require('./hilo');
-const carreras = require('./carreras'); // <--- 1. Importamos el módulo de carreras[cite: 4]
+const carreras = require('./carreras'); // <--- Módulo de carreras integrado[cite: 4, 5]
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
@@ -584,7 +584,7 @@ app.post('/api/carreras/bet', requireTelegramUser, function (req, res) {
   res.json(r);
 });
 
-carreras.start(); // <--- 2. Iniciamos el ciclo automático de las carreras
+carreras.start();
 
 // ---------- GESTIÓN DE WEBSOCKETS (PÓKER MULTIJUGADOR) ----------
 const multiplayerPokerRooms = {};
