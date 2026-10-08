@@ -511,4 +511,357 @@ app.post('/api/hilo/guess', requireTelegramUser, async function (req, res) {
       return res.status(400).json({ error: 'Adivinanza inválida.' });
     }
 
-    if (session.
+    if (session.deck.length === 0) {
+      delete hiloSessions[req.tgUser.id];
+      return res.status(400).json({ error: 'El mazo se ha agotado.' });
+    }
+
+    var pRound = hiloLogic.probGuess(session.deck, session.current.val, guess);
+    if (pRound <= 0) return res.status(400).json({ error: 'Apuesta imposible con la carta actual.' });
+
+    var nextIndex = Math.floor(Math.random() * session.deck.length);
+    var nextCard = session.deck.splice(nextIndex, 1)[0];
+
+    var isWin = false;
+    if (guess === 'higher') isWin = nextCard.val > session.current.val;
+    else if (guess === 'lower') isWin = nextCard.val < session.current.val;
+    else if (guess === 'equal') isWin = nextCard.val === session.current.val;
+
+    if (!isWin) {
+      delete hiloSessions[req.tgUser.id];
+      var u = await getUser(req.tgUser.id);
+      return res.json({ status: 'lose', nextCard: nextCard, balance: u.balance });
+    }
+
+    session.rounds++;
+    session.pCum *= pRound;
+    session.current = nextCard;
+
+    if (session.deck.length === 0) {
+      var mult = hiloLogic.TARGET_RTP / session.pCum;
+      var payout = Math.floor(session.bet * mult);
+      var newBalance = await applyDelta(req.tgUser.id, payout, 'hilo', 'Mazo terminado en Hi-Lo');
+      delete hiloSessions[req.tgUser.id];
+      return res.json({ status: 'autocash', nextCard: nextCard, balance: newBalance, payout: payout });
+    }
+
+    var u = await getUser(req.tgUser.id);
+    res.json(Object.assign({ status: 'win', nextCard: nextCard, balance: u.balance }, session.publicState()));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/hilo/cashout', requireTelegramUser, async function (req, res) {
+  try {
+    var session = hiloSessions[req.tgUser.id];
+    if (!session) return res.status(400).json({ error: 'No hay una partida de Hi-Lo activa.' });
+    if (session.rounds === 0) return res.status(400).json({ error: 'Debes acertar al menos una vez para cobrar.' });
+
+    var mult = hiloLogic.TARGET_RTP / session.pCum;
+    var payout = Math.floor(session.bet * mult);
+    var newBalance = await applyDelta(req.tgUser.id, payout, 'hilo', 'Cobro exitoso en Hi-Lo');
+    delete hiloSessions[req.tgUser.id];
+
+    res.json({ payout: payout, balance: newBalance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- GESTIÓN DE WEBSOCKETS (PÓKER MULTIJUGADOR) ----------
+const multiplayerPokerRooms = {};
+
+io.on('connection', function(socket) {
+  console.log('Cliente conectado por WebSockets:', socket.id);
+
+  socket.on('join_multiplayer_table', async function(data) {
+    var roomId = data.roomId || 'mesa_poker_1';
+    socket.join(roomId);
+
+    if (!multiplayerPokerRooms[roomId]) {
+      multiplayerPokerRooms[roomId] = {
+        players: [],
+        deck: [],
+        communityCards: [],
+        pot: 0,
+        currentTurnIndex: 0,
+        status: 'waiting', 
+        dealerMessage: 'Esperando jugadores...'
+      };
+    }
+
+    var room = multiplayerPokerRooms[roomId];
+    var existingPlayer = room.players.find(function(p) { return p.id === socket.id; });
+    
+    if (!existingPlayer) {
+      var tgId = data.telegramId ? parseInt(data.telegramId, 10) : null;
+      var userRecord = null;
+
+      try {
+        if (tgId) {
+          userRecord = await getUser(tgId);
+        }
+      } catch (err) {
+        console.error('Error buscando usuario para póker:', err);
+      }
+
+      var initialChips = userRecord ? userRecord.balance : (data.chips || 1000);
+      var realTelegramId = userRecord ? userRecord.telegram_id : tgId;
+
+      room.players.push({
+        id: socket.id,
+        telegramId: realTelegramId,
+        name: data.name || (userRecord ? userRecord.first_name : 'Jugador'),
+        chips: initialChips,
+        initialHandChips: initialChips,
+        currentBet: 0,
+        hasActed: false,
+        cards: [],
+        folded: false
+      });
+    }
+
+    broadcastRoomState(roomId);
+  });
+
+  socket.on('leave_multiplayer_table', async function(data) {
+    var roomId = data.roomId || 'mesa_poker_1';
+    var room = multiplayerPokerRooms[roomId];
+    if (!room) return;
+
+    var leavingPlayerIndex = room.players.findIndex(function(p) { return p.id === socket.id; });
+    if (leavingPlayerIndex !== -1) {
+      var leavingPlayer = room.players[leavingPlayerIndex];
+      
+      if (typeof leavingPlayer.telegramId === 'number') {
+        var diff = leavingPlayer.chips - leavingPlayer.initialHandChips;
+        if (diff !== 0) {
+          try {
+            await applyDelta(leavingPlayer.telegramId, diff, 'poker', 'Retiro definitivo de mesa de póker');
+          } catch (e) {
+            console.error('Error al guardar saldo al salir de la mesa:', e);
+          }
+        }
+      }
+
+      room.players.splice(leavingPlayerIndex, 1);
+      if (room.players.length < 2) room.status = 'waiting';
+      
+      broadcastRoomState(roomId);
+    }
+    socket.leave(roomId);
+  });
+
+  socket.on('start_hand', function(data) {
+    var roomId = data.roomId || 'mesa_poker_1';
+    var room = multiplayerPokerRooms[roomId];
+    if (!room || room.players.length < 2) return;
+
+    if (room.status === 'betting') {
+      socket.emit('error_message', 'No se puede iniciar una nueva mano mientras la partida actual está en curso.');
+      return;
+    }
+
+    room.deck = pokerLogic.freshDeck();
+    room.pot = 0;
+    room.communityCards = room.deck.splice(0, 5);
+    room.status = 'betting';
+    room.currentTurnIndex = 0;
+
+    room.players.forEach(function(p) {
+      p.cards = [room.deck.pop(), room.deck.pop()];
+      p.currentBet = 0;
+      p.hasActed = false;
+      p.folded = false;
+      p.lastHandEvaluation = null;
+    });
+
+    room.dealerMessage = '¡Mano iniciada! Turno de ' + room.players[0].name;
+    broadcastRoomState(roomId);
+  });
+
+  socket.on('player_action', function(data) {
+    var roomId = data.roomId || 'mesa_poker_1';
+    var room = multiplayerPokerRooms[roomId];
+    if (!room || room.status !== 'betting') return;
+
+    var currentPlayer = room.players[room.currentTurnIndex];
+    if (!currentPlayer || currentPlayer.id !== socket.id) return;
+
+    var action = data.action; 
+    var amount = parseInt(data.amount, 10) || 0;
+
+    if (action === 'bet') {
+      var maxCurrentBet = 0;
+      room.players.forEach(function(p) {
+        if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
+      });
+
+      var neededToCall = maxCurrentBet - currentPlayer.currentBet;
+      var raiseAmount = amount > 0 ? amount : 0;
+
+      var totalInvestment = neededToCall;
+      if (neededToCall === 0) {
+        totalInvestment = raiseAmount > 0 ? raiseAmount : 50; 
+      } else if (raiseAmount > 0 && raiseAmount !== neededToCall) {
+        totalInvestment = neededToCall + raiseAmount;
+      }
+
+      if (totalInvestment > currentPlayer.chips) {
+        totalInvestment = currentPlayer.chips; 
+      }
+
+      currentPlayer.chips -= totalInvestment;
+      currentPlayer.currentBet += totalInvestment;
+      room.pot += totalInvestment;
+      currentPlayer.hasActed = true;
+
+      if (currentPlayer.currentBet > maxCurrentBet) {
+        room.players.forEach(function(p) {
+          if (p.id !== currentPlayer.id && !p.folded) {
+            p.hasActed = false; 
+          }
+        });
+        room.dealerMessage = currentPlayer.name + ' subió la apuesta a $' + currentPlayer.currentBet;
+      } else {
+        room.dealerMessage = currentPlayer.name + ' igualó la apuesta ($' + totalInvestment + ')';
+      }
+    } else if (action === 'check') {
+      var maxCurrentBet = 0;
+      room.players.forEach(function(p) {
+        if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
+      });
+
+      if (maxCurrentBet > currentPlayer.currentBet) {
+        var neededToCall = maxCurrentBet - currentPlayer.currentBet;
+        if (neededToCall > currentPlayer.chips) neededToCall = currentPlayer.chips;
+        
+        currentPlayer.chips -= neededToCall;
+        currentPlayer.currentBet += neededToCall;
+        room.pot += neededToCall;
+        room.dealerMessage = currentPlayer.name + ' igualó por valor de $' + neededToCall;
+      } else {
+        room.dealerMessage = currentPlayer.name + ' pasó (Check).';
+      }
+      currentPlayer.hasActed = true;
+    } else if (action === 'fold') {
+      currentPlayer.folded = true;
+      currentPlayer.hasActed = true;
+      room.dealerMessage = currentPlayer.name + ' se retiró.';
+    }
+
+    var activePlayers = room.players.filter(function(p) { return !p.folded; });
+
+    if (activePlayers.length === 1) {
+      activePlayers[0].chips += room.pot;
+      room.dealerMessage = '🏆 ¡' + activePlayers[0].name + ' gana el pozo de $' + room.pot + ' por retirada!';
+      room.status = 'finished';
+      room.pot = 0;
+
+      sincronizarSaldosBD(room);
+      broadcastRoomState(roomId);
+      return;
+    }
+
+    var currentMaxBet = 0;
+    activePlayers.forEach(function(p) {
+      if (p.currentBet > currentMaxBet) currentMaxBet = p.currentBet;
+    });
+
+    var allActed = activePlayers.every(function(p) { return p.hasActed; });
+    var allBetsEqual = activePlayers.every(function(p) { return p.currentBet === currentMaxBet; });
+
+    if (allActed && allBetsEqual) {
+      triggerShowdown(room, activePlayers);
+      sincronizarSaldosBD(room);
+      broadcastRoomState(roomId);
+      return;
+    }
+
+    var turnsChecked = 0;
+    do {
+      room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+      turnsChecked++;
+    } while (room.players[room.currentTurnIndex].folded && turnsChecked < room.players.length);
+
+    broadcastRoomState(roomId);
+  });
+
+  socket.on('disconnect', async function() {
+    console.log('Cliente desconectado de WebSockets:', socket.id);
+    for (var roomId in multiplayerPokerRooms) {
+      var room = multiplayerPokerRooms[roomId];
+      var initialLength = room.players.length;
+      
+      var leavingPlayer = room.players.find(function(p) { return p.id === socket.id; });
+      if (leavingPlayer && typeof leavingPlayer.telegramId === 'number') {
+        var diff = leavingPlayer.chips - leavingPlayer.initialHandChips;
+        if (diff !== 0) {
+          try {
+            await applyDelta(leavingPlayer.telegramId, diff, 'poker', 'Retiro de mesa multijugador');
+          } catch (e) {
+            console.error('Error al guardar saldo al desconectar:', e);
+          }
+        }
+      }
+
+      room.players = room.players.filter(function(p) { return p.id !== socket.id; });
+      
+      if (room.players.length !== initialLength) {
+        if (room.players.length < 2) room.status = 'waiting';
+        broadcastRoomState(roomId);
+      }
+    }
+  });
+});
+
+async function sincronizarSaldosBD(room) {
+  for (var i = 0; i < room.players.length; i++) {
+    var p = room.players[i];
+    if (typeof p.telegramId === 'number') {
+      var diferencia = p.chips - p.initialHandChips;
+      if (diferencia !== 0) {
+        try {
+          await applyDelta(p.telegramId, diferencia, 'poker', 'Resultado de mano de póker multijugador');
+        } catch (err) {
+          console.error('Error aplicando delta en póker para usuario ' + p.telegramId + ':', err);
+        }
+      }
+      p.initialHandChips = p.chips;
+    }
+  }
+}
+
+function triggerShowdown(room, activePlayers) {
+  room.status = 'finished';
+
+  var bestPlayer = activePlayers[0];
+  var bestScoreDescription = 'Carta Alta';
+  var highestScore = -1;
+
+  activePlayers.forEach(function(p) {
+    var evaluation = pokerLogic.evalBestHand(p.cards, room.communityCards);
+    p.lastHandEvaluation = evaluation.name;
+
+    if (evaluation.score > highestScore) {
+      highestScore = evaluation.score;
+      bestPlayer = p;
+      bestScoreDescription = evaluation.name;
+    }
+  });
+
+  bestPlayer.chips += room.pot;
+  room.dealerMessage = '🏆 ¡GANADOR! ' + bestPlayer.name + ' gana el pozo de $' + room.pot + ' con ' + bestScoreDescription + '!';
+  room.pot = 0;
+}
+
+function broadcastRoomState(roomId) {
+  var room = multiplayerPokerRooms[roomId];
+  if (!room) return;
+  io.to(roomId).emit('update_multiplayer_table', room);
+}
+
+server.listen(PORT, function () {
+  console.log('Casino con soporte multijugador corriendo en el puerto ' + PORT);
+});
