@@ -29,6 +29,20 @@ async function initDb() {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS race_bets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        round_id INTEGER NOT NULL,
+        telegram_id INTEGER NOT NULL,
+        name TEXT,
+        horse INTEGER NOT NULL,
+        amount INTEGER NOT NULL,
+        settled INTEGER NOT NULL DEFAULT 0,
+        payout INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+
     console.log("Tablas inicializadas correctamente en Turso.");
   } catch (error) {
     console.error("Error al inicializar la base de datos:", error);
@@ -87,7 +101,6 @@ async function applyDelta(telegramId, delta, game, detail) {
   const newBalance = user.balance + delta;
   if (newBalance < 0) throw new Error('Saldo insuficiente');
 
-  // Ejecutamos las operaciones de actualización y registro de movimiento
   await db.execute({
     sql: 'UPDATE users SET balance = ? WHERE telegram_id = ?',
     args: [newBalance, telegramId]
