@@ -1,7 +1,20 @@
-// Funciones de evaluación de póker para Texas Hold'em (7 cartas: 2 propias + 5 comunitarias)
+// Funciones de evaluación de póker
 
 const suits = [{ s: '♠', red: false }, { s: '♣', red: false }, { s: '♥', red: true }, { s: '♦', red: true }];
 const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+
+const PAY_TABLE = {
+  'Escalera Real': 250,
+  'Escalera de Color': 50,
+  'Poker': 25,
+  'Full House': 6,
+  'Color': 5,
+  'Escalera': 4,
+  'Trío': 3,
+  'Doble Par': 2,
+  'Par de J o mejor': 1,
+  'Carta Alta': 0
+};
 
 function freshDeck() {
   var d = [];
@@ -36,7 +49,7 @@ function getCombinations(arr, k) {
   return ret;
 }
 
-// Evalúa una mano exacta de 5 cartas y devuelve un puntaje numérico y su nombre
+// Evalúa una mano exacta de 5 cartas (para Texas Hold'em)
 function evaluate5CardHand(hand) {
   hand.sort(function(a, b) { return b.val - a.val; });
   
@@ -48,18 +61,14 @@ function evaluate5CardHand(hand) {
   var isStraight = false;
   var straightHigh = 0;
   
-  // Verificar escalera normal
   if (values[0] - values[1] === 1 && values[1] - values[2] === 1 && values[2] - values[3] === 1 && values[3] - values[4] === 1) {
     isStraight = true;
     straightHigh = values[0];
-  } 
-  // Escalera especial A-5 (A, 5, 4, 3, 2)
-  else if (values[0] === 14 && values[1] === 5 && values[2] === 4 && values[3] === 3 && values[4] === 2) {
+  } else if (values[0] === 14 && values[1] === 5 && values[2] === 4 && values[3] === 3 && values[4] === 2) {
     isStraight = true;
-    straightHigh = 5; // El As cuenta como 1 bajo en esta escalera
+    straightHigh = 5;
   }
 
-  // Conteo de frecuencias (pares, tríos, pokers)
   var counts = {};
   values.forEach(function(v) { counts[v] = (counts[v] || 0) + 1; });
   
@@ -72,7 +81,6 @@ function evaluate5CardHand(hand) {
     return b.val - a.val;
   });
 
-  // Jerarquía de manos
   if (isStraight && isFlush) {
     return { score: 8000000 + straightHigh, name: straightHigh === 14 ? 'Escalera Real' : 'Escalera de Color' };
   }
@@ -101,7 +109,70 @@ function evaluate5CardHand(hand) {
   return { score: values[0], name: 'Carta Alta' };
 }
 
-// Función principal que evalúa las 7 cartas (2 del jugador + 5 comunitarias) y encuentra la mejor de 5
+// Función específica para evaluar la mano de Video Póker (Jacks or Better)
+function evalHand(hand) {
+  hand.sort(function(a, b) { return b.val - a.val; });
+  
+  var values = hand.map(function(c) { return c.val; });
+  var suitsList = hand.map(function(c) { return c.suit; });
+
+  var isFlush = suitsList.every(function(s) { return s === suitsList[0]; });
+  
+  var isStraight = false;
+  var straightHigh = 0;
+  
+  if (values[0] - values[1] === 1 && values[1] - values[2] === 1 && values[2] - values[3] === 1 && values[3] - values[4] === 1) {
+    isStraight = true;
+    straightHigh = values[0];
+  } else if (values[0] === 14 && values[1] === 5 && values[2] === 4 && values[3] === 3 && values[4] === 2) {
+    isStraight = true;
+    straightHigh = 5;
+  }
+
+  var counts = {};
+  values.forEach(function(v) { counts[v] = (counts[v] || 0) + 1; });
+  
+  var freq = [];
+  for (var v in counts) {
+    freq.push({ val: parseInt(v, 10), count: counts[v] });
+  }
+  freq.sort(function(a, b) {
+    if (b.count !== a.count) return b.count - a.count;
+    return b.val - a.val;
+  });
+
+  if (isStraight && isFlush) {
+    return straightHigh === 14 ? 'Escalera Real' : 'Escalera de Color';
+  }
+  if (freq[0].count === 4) {
+    return 'Poker';
+  }
+  if (freq[0].count === 3 && freq[1].count === 2) {
+    return 'Full House';
+  }
+  if (isFlush) {
+    return 'Color';
+  }
+  if (isStraight) {
+    return 'Escalera';
+  }
+  if (freq[0].count === 3) {
+    return 'Trío';
+  }
+  if (freq[0].count === 2 && freq[1].count === 2) {
+    return 'Doble Par';
+  }
+  if (freq[0].count === 2) {
+    // En Jacks or Better, el par debe ser de Jotas (11) o mayor
+    if (freq[0].val >= 11) {
+      return 'Par de J o mejor';
+    }
+  }
+
+  return 'Carta Alta';
+}
+
+// Función principal que evalúa las 7 cartas (2 del jugador + 5 comunitarias) para el póker multijugador
 function evalBestHand(playerCards, communityCards) {
   var totalCards = playerCards.concat(communityCards);
   var possible5CardHands = getCombinations(totalCards, 5);
@@ -120,5 +191,7 @@ function evalBestHand(playerCards, communityCards) {
 
 module.exports = {
   freshDeck: freshDeck,
-  evalBestHand: evalBestHand
+  evalHand: evalHand,
+  evalBestHand: evalBestHand,
+  PAY_TABLE: PAY_TABLE
 };
