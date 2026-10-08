@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const http = require('http');
+const http = http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
 const { getOrCreateUser, getUser, listUsers, applyDelta } = require('./db');
@@ -8,6 +8,7 @@ const { verifyInitData } = require('./telegramAuth');
 const pokerLogic = require('./pokerLogic');
 const minasLogic = require('./minas');
 const hiloLogic = require('./hilo');
+const carreras = require('./carreras'); // <--- 1. Importamos el módulo de carreras[cite: 4]
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_SECRET = process.env.ADMIN_SECRET;
@@ -568,6 +569,22 @@ app.post('/api/hilo/cashout', requireTelegramUser, async function (req, res) {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ---------- CARRERAS DE CABALLOS ----------
+app.post('/api/carreras/state', requireTelegramUser, function (req, res) {
+  getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+  res.json(carreras.getState(req.tgUser.id));
+});
+
+app.post('/api/carreras/bet', requireTelegramUser, function (req, res) {
+  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+  var name = u.first_name || u.username || ('Jugador ' + u.telegram_id);
+  var r = carreras.placeBet(req.tgUser.id, name, parseInt(req.body.horse, 10), parseInt(req.body.amount, 10));
+  if (r.error) return res.status(400).json(r);
+  res.json(r);
+});
+
+carreras.start(); // <--- 2. Iniciamos el ciclo automático de las carreras
 
 // ---------- GESTIÓN DE WEBSOCKETS (PÓKER MULTIJUGADOR) ----------
 const multiplayerPokerRooms = {};
