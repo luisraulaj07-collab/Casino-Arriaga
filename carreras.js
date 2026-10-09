@@ -9,16 +9,24 @@ const LEAD_MS = Number(process.env.RACE_LEAD_MS) || 2000;   // cuenta regresiva 
 const RESULT_MS = Number(process.env.RACE_RESULT_MS) || 6000;
 
 const HORSES = [
-  { n: 1, name: 'Relámpago', color: '#c0392b', p: 0.30 },
-  { n: 2, name: 'Tornado',   color: '#2471a3', p: 0.22 },
+  { n: 1, name: 'Aztek', color: '#c0392b', p: 0.30 },
+  { n: 2, name: 'Cartel',   color: '#2471a3', p: 0.22 },
   { n: 3, name: 'El Bandido', color: '#27ae60', p: 0.18 },
   { n: 4, name: 'Mezcal',    color: '#d4ac0d', p: 0.14 },
-  { n: 5, name: 'Azteca',    color: '#8e44ad', p: 0.10 },
-  { n: 6, name: 'Chamuco',   color: '#e67e22', p: 0.06 }
+  { n: 5, name: 'Mi perrita',    color: '#8e44ad', p: 0.10 },
+  { n: 6, name: 'Chiquito',   color: '#e67e22', p: 0.06 }
 ].map(function (h) { h.odds = RTP / h.p; return h; });
 
 let roundCounter = 1;
-let round = null;
+// Inicializamos 'round' por defecto para evitar valores nulos al arrancar
+let round = { 
+  id: 1, 
+  phase: 'bet', 
+  phaseEnd: Date.now() + BET_MS, 
+  order: null, 
+  runners: null, 
+  raceStart: null 
+};
 let lastResult = null;
 let history = [];
 let timer = null;
@@ -39,7 +47,8 @@ async function initTableAndCounter() {
     `);
     var res = await db.execute('SELECT COALESCE(MAX(round_id),0) AS m FROM race_bets');
     if (res.rows && res.rows[0]) {
-      roundCounter = res.rows[0].m;
+      roundCounter = res.rows[0].m || 1;
+      round.id = roundCounter;
     }
   } catch (e) {
     console.error('Error inicializando tabla race_bets:', e);
@@ -163,14 +172,14 @@ async function getState(userId) {
   var u = await getUser(userId);
   var st = {
     serverNow: now, 
-    roundId: round ? round.id : roundCounter, 
-    phase: round ? round.phase : 'bet', 
-    phaseEnd: round ? round.phaseEnd : now + BET_MS,
+    roundId: round.id, 
+    phase: round.phase, 
+    phaseEnd: round.phaseEnd,
     horses: HORSES.map(function (h) { return { n: h.n, name: h.name, color: h.color, odds: h.odds }; }),
     bets: bets.slice(-40).map(function (b) { return { name: b.name, horse: b.horse, amount: b.amount }; }),
     myBets: bets.filter(function (b) { return b.telegram_id === userId; }).map(function (b) { return { horse: b.horse, amount: b.amount }; }),
     history: history,
-    balance: u ? u.balance : 0,
+    balance: (u && typeof u.balance === 'number') ? u.balance : 0,
     lastResult: lastResult ? { roundId: lastResult.roundId, winner: lastResult.winner, winners: lastResult.winners.slice(0, 10) } : null,
     myResult: null
   };
@@ -181,7 +190,7 @@ async function getState(userId) {
       payout: mine.reduce(function (s, b) { return s + b.payout; }, 0)
     };
   }
-  if (round && round.phase !== 'bet') { st.raceStart = round.raceStart; st.runners = round.runners; }
+  if (round.phase !== 'bet') { st.raceStart = round.raceStart; st.runners = round.runners; }
   return st;
 }
 
