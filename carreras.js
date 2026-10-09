@@ -18,14 +18,13 @@ const HORSES = [
 ].map(function (h) { h.odds = RTP / h.p; return h; });
 
 let roundCounter = 1;
-// Inicializamos 'round' por defecto para evitar valores nulos al arrancar
-let round = { 
-  id: 1, 
-  phase: 'bet', 
-  phaseEnd: Date.now() + BET_MS, 
-  order: null, 
-  runners: null, 
-  raceStart: null 
+let round = {  
+  id: 1,  
+  phase: 'bet',  
+  phaseEnd: Date.now() + BET_MS,  
+  order: null,  
+  runners: null,  
+  raceStart: null  
 };
 let lastResult = null;
 let history = [];
@@ -47,7 +46,7 @@ async function initTableAndCounter() {
     `);
     var res = await db.execute('SELECT COALESCE(MAX(round_id),0) AS m FROM race_bets');
     if (res.rows && res.rows[0]) {
-      roundCounter = res.rows[0].m || 1;
+      roundCounter = Number(res.rows[0].m) || 1;
       round.id = roundCounter;
     }
   } catch (e) {
@@ -85,7 +84,7 @@ async function refundInterrupted() {
     var res = await db.execute('SELECT * FROM race_bets WHERE settled = 0');
     for (var i = 0; i < res.rows.length; i++) {
       var b = res.rows[i];
-      try { await applyDelta(b.telegram_id, b.amount, 'carreras', 'Reembolso: carrera interrumpida'); } catch (e) {}
+      try { await applyDelta(b.telegram_id, Number(b.amount), 'carreras', 'Reembolso: carrera interrumpida'); } catch (e) {}
       await db.execute({
         sql: 'UPDATE race_bets SET settled = 1 WHERE id = ?',
         args: [b.id]
@@ -124,21 +123,22 @@ async function settle() {
     var winners = [], results = [];
     for (var i = 0; i < bets.length; i++) {
       var b = bets[i];
+      var amount = Number(b.amount) || 0;
       var payout = 0;
-      if (b.horse === winner.n) {
-        payout = Math.floor(b.amount * winner.odds);
+      if (Number(b.horse) === winner.n) {
+        payout = Math.floor(amount * winner.odds);
         try { 
-          await applyDelta(b.telegram_id, payout, 'carreras', 'Ganó carrera #' + round.id); 
+          await applyDelta(Number(b.telegram_id), payout, 'carreras', 'Ganó carrera #' + round.id); 
         } catch (e) { 
           payout = 0; 
         }
-        winners.push({ name: b.name, amount: b.amount, payout: payout });
+        winners.push({ name: b.name, amount: amount, payout: payout });
       }
       await db.execute({
         sql: 'UPDATE race_bets SET settled = 1, payout = ? WHERE id = ?',
         args: [payout, b.id]
       });
-      results.push({ telegram_id: b.telegram_id, amount: b.amount, payout: payout });
+      results.push({ telegram_id: Number(b.telegram_id), amount: amount, payout: payout });
     }
     lastResult = { roundId: round.id, winner: winner.n, winners: winners, bets: results };
     history.unshift(winner.n);
@@ -170,43 +170,52 @@ async function getState(userId) {
     } catch (e) {}
   }
   var u = await getUser(userId);
+  var userBalance = u ? (Number(u.balance) || 0) : 0;
+
   var st = {
     serverNow: now, 
-    roundId: round.id, 
+    roundId: Number(round.id) || 1, 
     phase: round.phase, 
-    phaseEnd: round.phaseEnd,
+    phaseEnd: Number(round.phaseEnd) || (now + BET_MS),
     horses: HORSES.map(function (h) { return { n: h.n, name: h.name, color: h.color, odds: h.odds }; }),
-    bets: bets.slice(-40).map(function (b) { return { name: b.name, horse: b.horse, amount: b.amount }; }),
-    myBets: bets.filter(function (b) { return b.telegram_id === userId; }).map(function (b) { return { horse: b.horse, amount: b.amount }; }),
+    bets: bets.slice(-40).map(function (b) { return { name: b.name, horse: Number(b.horse), amount: Number(b.amount) }; }),
+    myBets: bets.filter(function (b) { return Number(b.telegram_id) === Number(userId); }).map(function (b) { return { horse: Number(b.horse), amount: Number(b.amount) }; }),
     history: history,
-    balance: (u && typeof u.balance === 'number') ? u.balance : 0,
+    balance: userBalance,
     lastResult: lastResult ? { roundId: lastResult.roundId, winner: lastResult.winner, winners: lastResult.winners.slice(0, 10) } : null,
     myResult: null
   };
   if (lastResult) {
-    var mine = lastResult.bets.filter(function (b) { return b.telegram_id === userId; });
+    var mine = lastResult.bets.filter(function (b) { return Number(b.telegram_id) === Number(userId); });
     if (mine.length) st.myResult = {
-      staked: mine.reduce(function (s, b) { return s + b.amount; }, 0),
-      payout: mine.reduce(function (s, b) { return s + b.payout; }, 0)
+      staked: mine.reduce(function (s, b) { return s + Number(b.amount); }, 0),
+      payout: mine.reduce(function (s, b) { return s + Number(b.payout); }, 0)
     };
   }
-  if (round.phase !== 'bet') { st.raceStart = round.raceStart; st.runners = round.runners; }
+  if (round.phase !== 'bet') { 
+    st.raceStart = Number(round.raceStart) || now; 
+    st.runners = round.runners; 
+  }
   return st;
 }
 
 async function placeBet(userId, name, horse, amount) {
   if (!round || round.phase !== 'bet' || Date.now() > round.phaseEnd - 300) return { error: 'Las apuestas están cerradas. Espera la siguiente carrera.' };
-  if (!Number.isInteger(horse) || horse < 1 || horse > HORSES.length) return { error: 'Caballo inválido.' };
-  if (!Number.isInteger(amount) || amount <= 0) return { error: 'Monto inválido.' };
+  var parsedHorse = Number(horse);
+  var parsedAmount = Number(amount);
+  if (!Number.isInteger(parsedHorse) || parsedHorse < 1 || parsedHorse > HORSES.length) return { error: 'Caballo inválido.' };
+  if (!Number.isInteger(parsedAmount) || parsedAmount <= 0) return { error: 'Monto inválido.' };
+  
   var balance;
   try { 
-    balance = await applyDelta(userId, -amount, 'carreras', 'Apuesta carrera #' + round.id + ' al caballo ' + horse); 
+    balance = await applyDelta(userId, -parsedAmount, 'carreras', 'Apuesta carrera #' + round.id + ' al caballo ' + parsedHorse); 
+    balance = Number(balance) || 0;
   } catch (e) { 
     return { error: e.message === 'Saldo insuficiente' ? 'Saldo insuficiente.' : 'No se pudo apostar.' }; 
   }
   await db.execute({
     sql: 'INSERT INTO race_bets (round_id, telegram_id, name, horse, amount) VALUES (?, ?, ?, ?, ?)',
-    args: [round.id, userId, name, horse, amount]
+    args: [round.id, userId, name, parsedHorse, parsedAmount]
   });
   return { balance: balance };
 }
