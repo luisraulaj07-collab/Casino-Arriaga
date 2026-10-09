@@ -9,12 +9,12 @@ const LEAD_MS = Number(process.env.RACE_LEAD_MS) || 2000;   // cuenta regresiva 
 const RESULT_MS = Number(process.env.RACE_RESULT_MS) || 6000;
 
 const HORSES = [
-  { n: 1, name: 'Aztek', color: '#c0392b', p: 0.30 },
-  { n: 2, name: 'Cartel',   color: '#2471a3', p: 0.22 },
+  { n: 1, name: 'Relámpago', color: '#c0392b', p: 0.30 },
+  { n: 2, name: 'Tornado',   color: '#2471a3', p: 0.22 },
   { n: 3, name: 'El Bandido', color: '#27ae60', p: 0.18 },
   { n: 4, name: 'Mezcal',    color: '#d4ac0d', p: 0.14 },
-  { n: 5, name: 'Mi perrita',    color: '#8e44ad', p: 0.10 },
-  { n: 6, name: 'Chiquito',   color: '#e67e22', p: 0.06 }
+  { n: 5, name: 'Azteca',    color: '#8e44ad', p: 0.10 },
+  { n: 6, name: 'Chamuco',   color: '#e67e22', p: 0.06 }
 ].map(function (h) { h.odds = RTP / h.p; return h; });
 
 let roundCounter = 1;
