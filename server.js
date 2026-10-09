@@ -570,18 +570,27 @@ app.post('/api/hilo/cashout', requireTelegramUser, async function (req, res) {
   }
 });
 
-// ---------- CARRERAS DE CABALLOS ----------
-app.post('/api/carreras/state', requireTelegramUser, function (req, res) {
-  getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-  res.json(carreras.getState(req.tgUser.id));
+// ---------- CARRERAS DE CABALLOS (Corregido con async/await) ----------
+app.post('/api/carreras/state', requireTelegramUser, async function (req, res) {
+  try {
+    await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var state = await carreras.getState(req.tgUser.id);
+    res.json(state);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.post('/api/carreras/bet', requireTelegramUser, function (req, res) {
-  var u = getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-  var name = u.first_name || u.username || ('Jugador ' + u.telegram_id);
-  var r = carreras.placeBet(req.tgUser.id, name, parseInt(req.body.horse, 10), parseInt(req.body.amount, 10));
-  if (r.error) return res.status(400).json(r);
-  res.json(r);
+app.post('/api/carreras/bet', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var name = u.first_name || u.username || ('Jugador ' + u.telegram_id);
+    var r = await carreras.placeBet(req.tgUser.id, name, parseInt(req.body.horse, 10), parseInt(req.body.amount, 10));
+    if (r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 carreras.start();
