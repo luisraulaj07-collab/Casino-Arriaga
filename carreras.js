@@ -2,7 +2,7 @@
 // Ciclo: apuestas (20 s) -> carrera (20 s) -> resultados (6 s) -> nueva ronda.
 const { db, applyDelta, getUser } = require('./db');
 
-const RTP = 0.90; // 10% de ventaja para la casa
+const RTP = 0.90; // 10% de ventaja para la casa[cite: 5]
 const BET_MS = Number(process.env.RACE_BET_MS) || 20000;
 const RACE_MS = Number(process.env.RACE_RACE_MS) || 20000;
 const LEAD_MS = Number(process.env.RACE_LEAD_MS) || 2000;   // cuenta regresiva antes de arrancar
@@ -17,22 +17,34 @@ const HORSES = [
   { n: 6, name: 'Chamuco',   color: '#e67e22', p: 0.06 }
 ].map(function (h) { h.odds = RTP / h.p; return h; });
 
-db.exec(`CREATE TABLE IF NOT EXISTS race_bets (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  round_id INTEGER NOT NULL,
-  telegram_id INTEGER NOT NULL,
-  name TEXT,
-  horse INTEGER NOT NULL,
-  amount INTEGER NOT NULL,
-  settled INTEGER NOT NULL DEFAULT 0,
-  payout INTEGER NOT NULL DEFAULT 0
-)`);
-
-let roundCounter = db.prepare('SELECT COALESCE(MAX(round_id),0) AS m FROM race_bets').get().m;
+let roundCounter = 1;
 let round = null;
 let lastResult = null;
 let history = [];
 let timer = null;
+
+async function initTableAndCounter() {
+  try {
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS race_bets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        round_id INTEGER NOT NULL,
+        telegram_id INTEGER NOT NULL,
+        name TEXT,
+        horse INTEGER NOT NULL,
+        amount INTEGER NOT NULL,
+        settled INTEGER NOT NULL DEFAULT 0,
+        payout INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+    var res = await db.execute('SELECT COALESCE(MAX(round_id),0) AS m FROM race_bets');
+    if (res.rows && res.rows[0]) {
+      roundCounter = res.rows[0].m;
+    }
+  } catch (e) {
+    console.error('Error inicializando tabla race_bets:', e);
+  }
+}
 
 // Orden de llegada: sorteos ponderados sucesivos (el primero es el ganador).
 function drawOrder() {
@@ -59,11 +71,20 @@ function makeRunners(order) {
   });
 }
 
-function refundInterrupted() {
-  db.prepare('SELECT * FROM race_bets WHERE settled = 0').all().forEach(function (b) {
-    try { applyDelta(b.telegram_id, b.amount, 'carreras', 'Reembolso: carrera interrumpida'); } catch (e) {}
-    db.prepare('UPDATE race_bets SET settled = 1 WHERE id = ?').run(b.id);
-  });
+async function refundInterrupted() {
+  try {
+    var res = await db.execute('SELECT * FROM race_bets WHERE settled = 0');
+    for (var i = 0; i < res.rows.length; i++) {
+      var b = res.rows[i];
+      try { await applyDelta(b.telegram_id, b.amount, 'carreras', 'Reembolso: carrera interrumpida'); } catch (e) {}
+      await db.execute({
+        sql: 'UPDATE race_bets SET settled = 1 WHERE id = ?',
+        args: [b.id]
+      });
+    }
+  } catch (e) {
+    console.error('Error en reembolso:', e);
+  }
 }
 
 function startBetting() {
@@ -83,39 +104,68 @@ function closeBets() {
   timer = setTimeout(settle, LEAD_MS + RACE_MS);
 }
 
-function settle() {
+async function settle() {
   var winner = round.order[0];
-  var bets = db.prepare('SELECT * FROM race_bets WHERE round_id = ?').all(round.id);
-  var winners = [], results = [];
-  bets.forEach(function (b) {
-    var payout = 0;
-    if (b.horse === winner.n) {
-      payout = Math.floor(b.amount * winner.odds);
-      try { applyDelta(b.telegram_id, payout, 'carreras', 'Ganó carrera #' + round.id); } catch (e) { payout = 0; }
-      winners.push({ name: b.name, amount: b.amount, payout: payout });
+  try {
+    var res = await db.execute({
+      sql: 'SELECT * FROM race_bets WHERE round_id = ?',
+      args: [round.id]
+    });
+    var bets = res.rows;
+    var winners = [], results = [];
+    for (var i = 0; i < bets.length; i++) {
+      var b = bets[i];
+      var payout = 0;
+      if (b.horse === winner.n) {
+        payout = Math.floor(b.amount * winner.odds);
+        try { 
+          await applyDelta(b.telegram_id, payout, 'carreras', 'Ganó carrera #' + round.id); 
+        } catch (e) { 
+          payout = 0; 
+        }
+        winners.push({ name: b.name, amount: b.amount, payout: payout });
+      }
+      await db.execute({
+        sql: 'UPDATE race_bets SET settled = 1, payout = ? WHERE id = ?',
+        args: [payout, b.id]
+      });
+      results.push({ telegram_id: b.telegram_id, amount: b.amount, payout: payout });
     }
-    db.prepare('UPDATE race_bets SET settled = 1, payout = ? WHERE id = ?').run(payout, b.id);
-    results.push({ telegram_id: b.telegram_id, amount: b.amount, payout: payout });
-  });
-  lastResult = { roundId: round.id, winner: winner.n, winners: winners, bets: results };
-  history.unshift(winner.n);
-  history = history.slice(0, 8);
+    lastResult = { roundId: round.id, winner: winner.n, winners: winners, bets: results };
+    history.unshift(winner.n);
+    history = history.slice(0, 8);
+  } catch (e) {
+    console.error('Error al liquidar apuestas:', e);
+  }
   round.phase = 'result';
   round.phaseEnd = Date.now() + RESULT_MS;
   timer = setTimeout(startBetting, RESULT_MS);
 }
 
-function start() {
-  refundInterrupted();
+async function start() {
+  await initTableAndCounter();
+  await refundInterrupted();
   startBetting();
 }
 
-function getState(userId) {
+async function getState(userId) {
   var now = Date.now();
-  var bets = db.prepare('SELECT * FROM race_bets WHERE round_id = ?').all(round.id);
-  var u = getUser(userId);
+  var bets = [];
+  if (round) {
+    try {
+      var res = await db.execute({
+        sql: 'SELECT * FROM race_bets WHERE round_id = ?',
+        args: [round.id]
+      });
+      bets = res.rows;
+    } catch (e) {}
+  }
+  var u = await getUser(userId);
   var st = {
-    serverNow: now, roundId: round.id, phase: round.phase, phaseEnd: round.phaseEnd,
+    serverNow: now, 
+    roundId: round ? round.id : roundCounter, 
+    phase: round ? round.phase : 'bet', 
+    phaseEnd: round ? round.phaseEnd : now + BET_MS,
     horses: HORSES.map(function (h) { return { n: h.n, name: h.name, color: h.color, odds: h.odds }; }),
     bets: bets.slice(-40).map(function (b) { return { name: b.name, horse: b.horse, amount: b.amount }; }),
     myBets: bets.filter(function (b) { return b.telegram_id === userId; }).map(function (b) { return { horse: b.horse, amount: b.amount }; }),
@@ -131,19 +181,24 @@ function getState(userId) {
       payout: mine.reduce(function (s, b) { return s + b.payout; }, 0)
     };
   }
-  if (round.phase !== 'bet') { st.raceStart = round.raceStart; st.runners = round.runners; }
+  if (round && round.phase !== 'bet') { st.raceStart = round.raceStart; st.runners = round.runners; }
   return st;
 }
 
-function placeBet(userId, name, horse, amount) {
+async function placeBet(userId, name, horse, amount) {
   if (!round || round.phase !== 'bet' || Date.now() > round.phaseEnd - 300) return { error: 'Las apuestas están cerradas. Espera la siguiente carrera.' };
   if (!Number.isInteger(horse) || horse < 1 || horse > HORSES.length) return { error: 'Caballo inválido.' };
   if (!Number.isInteger(amount) || amount <= 0) return { error: 'Monto inválido.' };
   var balance;
-  try { balance = applyDelta(userId, -amount, 'carreras', 'Apuesta carrera #' + round.id + ' al caballo ' + horse); }
-  catch (e) { return { error: e.message === 'Saldo insuficiente' ? 'Saldo insuficiente.' : 'No se pudo apostar.' }; }
-  db.prepare('INSERT INTO race_bets (round_id, telegram_id, name, horse, amount) VALUES (?, ?, ?, ?, ?)')
-    .run(round.id, userId, name, horse, amount);
+  try { 
+    balance = await applyDelta(userId, -amount, 'carreras', 'Apuesta carrera #' + round.id + ' al caballo ' + horse); 
+  } catch (e) { 
+    return { error: e.message === 'Saldo insuficiente' ? 'Saldo insuficiente.' : 'No se pudo apostar.' }; 
+  }
+  await db.execute({
+    sql: 'INSERT INTO race_bets (round_id, telegram_id, name, horse, amount) VALUES (?, ?, ?, ?, ?)',
+    args: [round.id, userId, name, horse, amount]
+  });
   return { balance: balance };
 }
 
