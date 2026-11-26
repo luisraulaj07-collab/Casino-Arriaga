@@ -2,18 +2,44 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<title>Panel del dealer — Cartel Mexicano</title>
+<title>Panel del dealer — Casino por pinche gusto</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="style.css">
+<style>
+  .staff-badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.08);
+    color: var(--gold);
+    margin-bottom: 10px;
+  }
+  .user-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    font-size: 13px;
+    gap: 8px;
+  }
+  .user-meta {
+    color: var(--gold-dim);
+    font-size: 11px;
+  }
+</style>
 </head>
 <body>
-<div class="table black" style="max-width:600px">
-  <div class="brand">CARTEL MEXICANO</div>
-  <div class="brand-sub">PANEL DEL DEALER</div>
+<div class="table black" style="max-width:640px">
+  <div class="brand">CASINO POR PINCHE GUSTO</div>
+  <div class="brand-sub">PANEL DEL DEALER Y COLABORADORES</div>
 
   <div class="panel">
-    <div class="row">
-      <input type="password" id="secret" placeholder="Tu clave de dealer (ADMIN_SECRET)">
+    <div class="staff-badge" id="staffRole">Acceso: Pendiente</div>
+    <div class="row" style="flex-wrap:wrap">
+      <input type="text" id="staffName" placeholder="Tu nombre o alias (ej. Colaborador 1)">
+      <input type="password" id="secret" placeholder="Clave de acceso (ADMIN_SECRET o clave staff)">
       <button id="loadBtn">Ver jugadores</button>
     </div>
     <div class="error" id="err"></div>
@@ -24,59 +50,155 @@
   </div>
 
   <div class="panel" id="rechargePanel" style="display:none">
-    <div class="row">
+    <div class="row" style="flex-wrap:wrap">
       <select id="userSelect"></select>
-      <input type="number" id="amount" placeholder="Monto a agregar">
-      <button id="rechargeBtn">Recargar</button>
+      <select id="actionType">
+        <option value="recharge">Recargar (+)</option>
+        <option value="payout">Pagar / descontar (-)</option>
+      </select>
+      <input type="number" id="amount" min="1" placeholder="Monto">
+      <button id="rechargeBtn">Aplicar</button>
     </div>
     <div class="msg" id="rechargeMsg"></div>
   </div>
+
+  <a class="lobby-link" href="index.html">← Volver a la mesa principal</a>
 </div>
 
 <script>
   var el = {
-    secret: document.getElementById('secret'), loadBtn: document.getElementById('loadBtn'), err: document.getElementById('err'),
-    usersPanel: document.getElementById('usersPanel'), usersList: document.getElementById('usersList'),
-    rechargePanel: document.getElementById('rechargePanel'), userSelect: document.getElementById('userSelect'),
-    amount: document.getElementById('amount'), rechargeBtn: document.getElementById('rechargeBtn'), rechargeMsg: document.getElementById('rechargeMsg')
+    staffRole: document.getElementById('staffRole'),
+    staffName: document.getElementById('staffName'),
+    secret: document.getElementById('secret'),
+    loadBtn: document.getElementById('loadBtn'),
+    err: document.getElementById('err'),
+    usersPanel: document.getElementById('usersPanel'),
+    usersList: document.getElementById('usersList'),
+    rechargePanel: document.getElementById('rechargePanel'),
+    userSelect: document.getElementById('userSelect'),
+    actionType: document.getElementById('actionType'),
+    amount: document.getElementById('amount'),
+    rechargeBtn: document.getElementById('rechargeBtn'),
+    rechargeMsg: document.getElementById('rechargeMsg')
   };
 
-  function loadUsers(){
+  // Recuperar clave y alias en la pestaña actual para no reescribirlos a cada rato
+  el.secret.value = sessionStorage.getItem('cpg_staff_secret') || '';
+  el.staffName.value = sessionStorage.getItem('cpg_staff_name') || '';
+
+  function formatLabel(u) {
+    var base = u.first_name || u.username || u.telegram_id;
+    return u.username ? (base + ' (@' + u.username + ')') : String(base);
+  }
+
+  function loadUsers() {
     el.err.textContent = '';
-    fetch('/api/admin/users', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({adminSecret: el.secret.value}) })
-      .then(function(r){ return r.json(); }).then(function(data){
-        if(data.error){ el.err.textContent = data.error; return; }
-        el.usersList.innerHTML = '';
-        el.userSelect.innerHTML = '';
-        data.forEach(function(u){
-          var row = document.createElement('div');
-          row.style.padding = '6px 0'; row.style.borderTop = '1px solid rgba(255,255,255,0.08)'; row.style.fontSize='13px';
-          row.innerHTML = '<b style="color:var(--gold)">'+(u.first_name||u.username||u.telegram_id)+'</b> — $'+u.balance;
-          el.usersList.appendChild(row);
-          var opt = document.createElement('option');
-          opt.value = u.telegram_id;
-          opt.textContent = (u.first_name||u.username||u.telegram_id) + ' — $' + u.balance;
-          el.userSelect.appendChild(opt);
-        });
-        el.usersPanel.style.display = '';
-        el.rechargePanel.style.display = data.length ? '' : 'none';
+    var secretVal = el.secret.value.trim();
+    var staffVal = el.staffName.value.trim();
+    if (!secretVal) {
+      el.err.textContent = 'Ingresa la clave de acceso.';
+      return;
+    }
+    sessionStorage.setItem('cpg_staff_secret', secretVal);
+    sessionStorage.setItem('cpg_staff_name', staffVal);
+
+    fetch('/api/admin/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminSecret: secretVal, staffName: staffVal })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        el.err.textContent = data.error;
+        return;
+      }
+      var list = Array.isArray(data) ? data : (data.users || []);
+      var roleLabel = (!Array.isArray(data) && data.role) ? data.role : 'Dealer / Admin';
+      el.staffRole.textContent = 'Acceso: ' + roleLabel + (staffVal ? ' — ' + staffVal : '');
+
+      el.usersList.innerHTML = '';
+      el.userSelect.innerHTML = '';
+
+      list.forEach(function(u) {
+        var row = document.createElement('div');
+        row.className = 'user-row';
+
+        var left = document.createElement('div');
+        var title = document.createElement('b');
+        title.style.color = 'var(--gold)';
+        title.textContent = formatLabel(u);
+        var sub = document.createElement('div');
+        sub.className = 'user-meta';
+        sub.textContent = 'ID: ' + u.telegram_id;
+        left.appendChild(title);
+        left.appendChild(sub);
+
+        var right = document.createElement('b');
+        right.textContent = '$' + Number(u.balance || 0);
+
+        row.appendChild(left);
+        row.appendChild(right);
+        el.usersList.appendChild(row);
+
+        var opt = document.createElement('option');
+        opt.value = u.telegram_id;
+        opt.textContent = formatLabel(u) + ' — $' + Number(u.balance || 0);
+        el.userSelect.appendChild(opt);
       });
+
+      el.usersPanel.style.display = list.length ? '' : 'none';
+      el.rechargePanel.style.display = list.length ? '' : 'none';
+    })
+    .catch(function() {
+      el.err.textContent = 'Error de conexión al consultar jugadores.';
+    });
   }
 
   el.loadBtn.addEventListener('click', loadUsers);
-  el.rechargeBtn.addEventListener('click', function(){
+
+  el.rechargeBtn.addEventListener('click', function() {
+    el.rechargeMsg.textContent = '';
     var telegramId = el.userSelect.value;
-    var amount = parseInt(el.amount.value, 10);
-    if(!amount){ el.rechargeMsg.textContent = 'Escribe un monto.'; return; }
-    fetch('/api/admin/recharge', { method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ adminSecret: el.secret.value, telegramId: telegramId, amount: amount }) })
-      .then(function(r){ return r.json(); }).then(function(data){
-        if(data.error){ el.rechargeMsg.textContent = data.error; return; }
-        el.rechargeMsg.textContent = 'Listo — nuevo saldo: $' + data.balance;
-        el.amount.value = '';
-        loadUsers();
-      });
+    var rawAmount = parseInt(el.amount.value, 10);
+    if (!rawAmount || rawAmount <= 0) {
+      el.rechargeMsg.textContent = 'Escribe un monto mayor a 0.';
+      return;
+    }
+
+    var isPayout = el.actionType.value === 'payout';
+    var finalAmount = isPayout ? -Math.abs(rawAmount) : Math.abs(rawAmount);
+    var staffVal = el.staffName.value.trim() || 'staff';
+
+    fetch('/api/admin/recharge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        adminSecret: el.secret.value.trim(),
+        staffName: staffVal,
+        actionType: el.actionType.value,
+        telegramId: telegramId,
+        amount: finalAmount
+      })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        el.rechargeMsg.textContent = data.error;
+        return;
+      }
+      el.rechargeMsg.textContent = 'Listo (' + (isPayout ? 'Pago/descuento' : 'Recarga') + ') — nuevo saldo: $' + data.balance;
+      el.amount.value = '';
+      loadUsers();
+    })
+    .catch(function() {
+      el.rechargeMsg.textContent = 'Error al actualizar el saldo.';
+    });
   });
+
+  if (el.secret.value) {
+    loadUsers();
+  }
 </script>
 </body>
 </html>
