@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Acceso — Casino por pinche gusto</title>
+  <style>
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: #0d1017;
+      color: #f4f6fb;
+      padding: 16px;
+    }
+    .card {
+      width: 100%;
+      max-width: 390px;
+      background: #161b26;
+      border: 1px solid #273043;
+      border-radius: 14px;
+      padding: 24px;
+      box-shadow: 0 14px 36px rgba(0,0,0,.45);
+    }
+    .brand { text-align: center; margin-bottom: 20px; }
+    .brand h1 { margin: 0; font-size: 1.45rem; color: #f5b942; }
+    .brand p { margin: 6px 0 0; font-size: .88rem; color: #9aa6bd; }
+    .tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+    .tab {
+      padding: 10px;
+      border: 1px solid #2b354b;
+      background: #10141d;
+      color: #9aa6bd;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .tab.active {
+      background: #f5b942;
+      color: #111;
+      border-color: #f5b942;
+    }
+    .field { margin-bottom: 14px; }
+    label { display: block; font-size: .85rem; margin-bottom: 6px; color: #cbd5e1; }
+    input {
+      width: 100%;
+      padding: 11px 12px;
+      border-radius: 8px;
+      border: 1px solid #2d374d;
+      background: #0d1017;
+      color: #fff;
+      font-size: .95rem;
+    }
+    input:focus { outline: none; border-color: #f5b942; }
+    .btn {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: 8px;
+      background: #f5b942;
+      color: #111;
+      font-weight: 700;
+      font-size: 1rem;
+      cursor: pointer;
+      margin-top: 6px;
+    }
+    .btn:disabled { opacity: .6; cursor: not-allowed; }
+    .msg {
+      margin-top: 12px;
+      font-size: .88rem;
+      min-height: 20px;
+      text-align: center;
+      color: #f87171;
+    }
+    .msg.ok { color: #4ade80; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <h1>Casino por pinche gusto</h1>
+      <p>Entra con tu cuenta web para jugar y revisar tu saldo</p>
+    </div>
+
+    <div class="tabs">
+      <button type="button" id="tabLogin" class="tab active">Iniciar sesión</button>
+      <button type="button" id="tabRegister" class="tab">Crear cuenta</button>
+    </div>
+
+    <!-- Formulario Login -->
+    <form id="loginForm">
+      <div class="field">
+        <label for="loginUser">Usuario</label>
+        <input id="loginUser" type="text" autocomplete="username" required placeholder="tu_usuario" />
+      </div>
+      <div class="field">
+        <label for="loginPass">Contraseña</label>
+        <input id="loginPass" type="password" autocomplete="current-password" required placeholder="••••••••" />
+      </div>
+      <button type="submit" class="btn" id="loginBtn">Entrar al casino</button>
+    </form>
+
+    <!-- Formulario Registro -->
+    <form id="registerForm" class="hidden">
+      <div class="field">
+        <label for="regUser">Usuario (3 a 20 caracteres, sin espacios)</label>
+        <input id="regUser" type="text" autocomplete="username" required placeholder="nuevo_jugador" />
+      </div>
+      <div class="field">
+        <label for="regName">Nombre o apodo visible (opcional)</label>
+        <input id="regName" type="text" placeholder="Ej. El Güero" />
+      </div>
+      <div class="field">
+        <label for="regEmail">Correo (opcional)</label>
+        <input id="regEmail" type="email" placeholder="correo@ejemplo.com" />
+      </div>
+      <div class="field">
+        <label for="regPass">Contraseña (mín. 4 caracteres)</label>
+        <input id="regPass" type="password" autocomplete="new-password" required placeholder="••••••••" />
+      </div>
+      <button type="submit" class="btn" id="regBtn">Crear cuenta y entrar</button>
+    </form>
+
+    <div id="msg" class="msg"></div>
+  </div>
+
+  <script>
+    const tabLogin = document.getElementById('tabLogin');
+    const tabRegister = document.getElementById('tabRegister');
+    const loginForm = document.getElementById('loginForm');
+    const registerForm = document.getElementById('registerForm');
+    const msg = document.getElementById('msg');
+
+    function setTab(mode) {
+      msg.textContent = '';
+      msg.classList.remove('ok');
+      const isLogin = mode === 'login';
+      tabLogin.classList.toggle('active', isLogin);
+      tabRegister.classList.toggle('active', !isLogin);
+      loginForm.classList.toggle('hidden', !isLogin);
+      registerForm.classList.toggle('hidden', isLogin);
+    }
+
+    tabLogin.addEventListener('click', () => setTab('login'));
+    tabRegister.addEventListener('click', () => setTab('register'));
+
+    async function sendAuth(url, payload, btn) {
+      btn.disabled = true;
+      msg.textContent = '';
+      msg.classList.remove('ok');
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          msg.textContent = data.error || 'No se pudo completar la acción.';
+          btn.disabled = false;
+          return;
+        }
+        localStorage.setItem('casino_token', data.token);
+        localStorage.setItem('casino_user', JSON.stringify(data.user));
+        msg.textContent = '¡Listo! Entrando al casino...';
+        msg.classList.add('ok');
+        setTimeout(() => {
+          window.location.href = '/index.html';
+        }, 400);
+      } catch (err) {
+        msg.textContent = 'Error de conexión con el servidor.';
+        btn.disabled = false;
+      }
+    }
+
+    loginForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      sendAuth('/api/auth/login', {
+        username: document.getElementById('loginUser').value,
+        password: document.getElementById('loginPass').value
+      }, document.getElementById('loginBtn'));
+    });
+
+    registerForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      sendAuth('/api/auth/register', {
+        username: document.getElementById('regUser').value,
+        firstName: document.getElementById('regName').value,
+        email: document.getElementById('regEmail').value,
+        password: document.getElementById('regPass').value
+      }, document.getElementById('regBtn'));
+    });
+  </script>
+</body>
+</html>
