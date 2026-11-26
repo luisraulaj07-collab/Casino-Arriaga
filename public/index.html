@@ -2,14 +2,60 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<title>Cartel Mexicano — Casino</title>
+<title>Casino por pinche gusto</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="style.css">
+<style>
+  .top-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: space-between;
+    margin-top: 12px;
+  }
+  .btn-secondary {
+    flex: 1;
+    padding: 9px 12px;
+    border-radius: 8px;
+    border: 1px solid rgba(255,255,255,.18);
+    background: rgba(255,255,255,.06);
+    color: #fff;
+    cursor: pointer;
+    font-size: .88rem;
+  }
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.72);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 50;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal-card {
+    width: 100%;
+    max-width: 400px;
+    background: #151922;
+    border: 1px solid #2b3447;
+    border-radius: 12px;
+    padding: 20px;
+    color: #f3f4f6;
+  }
+  .modal-card h3 { margin: 0 0 10px; color: #f5b942; }
+  .modal-card p { margin: 0 0 10px; font-size: .9rem; line-height: 1.45; color: #cbd5e1; }
+  .modal-card code {
+    background: #0b0e14;
+    padding: 2px 6px;
+    border-radius: 5px;
+    color: #fde68a;
+  }
+</style>
 </head>
 <body>
 <div class="table black">
-  <div class="brand">CARTEL MEXICANO — CASA</div>
+  <div class="brand">CASINO POR PINCHE GUSTO</div>
   <div class="brand-sub">MESA PRINCIPAL</div>
 
   <div class="hud">
@@ -25,15 +71,36 @@
       <a href="roulette.html" style="width:100%"><button style="width:100%">🎡 Jugar Ruleta</button></a>
       <a href="minas.html" style="width:100%"><button style="width:100%">💣 Jugar Minas</button></a>
       <a href="videopoker.html" style="width:100%"><button style="width:100%">🃏 Jugar Poker</button></a>
-      <a href="hilo.html" style="width:100%<span>"><button style="width:100%">📶 Jugar Hilo</button></a>
-      <a href="carreras.html" style="width:100%<span>"><button style="width:100%">🐎 Jugar Carreras de caballos</button></a>
-      <a href= style="width:100%"><button style="width:100%; background: linear-gradient(135deg, #b39b58, #8e6f3e); color:#0d281f; font-weight:bold;">🤠 Mesa Póker Multijugador (En mantenimiento)</button></a>
+      <a href="hilo.html" style="width:100%"><button style="width:100%">📶 Jugar Hilo</button></a>
+      <a href="carreras.html" style="width:100%"><button style="width:100%">🐎 Jugar Carreras de caballos</button></a>
+      <a href="javascript:void(0)" style="width:100%"><button style="width:100%; background: linear-gradient(135deg, #b39b58, #8e6f3e); color:#0d281f; font-weight:bold;">🤠 Mesa Póker Multijugador (En mantenimiento)</button></a>
+    </div>
+
+    <div class="top-actions">
+      <button type="button" class="btn-secondary" id="openWithdraw">💸 Retirar saldo</button>
+      <button type="button" class="btn-secondary" id="logoutBtn">Cerrar sesión</button>
     </div>
   </div>
 </div>
 
+<!-- Modal de retiros -->
+<div class="modal-backdrop" id="withdrawModal">
+  <div class="modal-card">
+    <h3>Cómo solicitar un retiro</h3>
+    <p>Para retirar tu saldo, manda un mensaje directo en <strong>Telegram</strong> indicando:</p>
+    <p>1. Tu <strong>usuario</strong> en Casino por pinche gusto (<code id="modalUser">—</code>).</p>
+    <p>2. Tu <strong>enlace del juego</strong> para el envío, o bien tu <strong>ID de Binance</strong> para hacer la transferencia.</p>
+    <button type="button" class="btn-secondary" style="width:100%; margin-top:8px;" id="closeWithdraw">Entendido</button>
+  </div>
+</div>
+
 <script>
-  var initData = "";
+  const webToken = localStorage.getItem('casino_token') || '';
+  const savedUserRaw = localStorage.getItem('casino_user');
+  let savedUser = null;
+  try { savedUser = savedUserRaw ? JSON.parse(savedUserRaw) : null; } catch (e) {}
+
+  let initData = "";
   try {
     if (window.Telegram && window.Telegram.WebApp) {
       window.Telegram.WebApp.ready();
@@ -49,23 +116,61 @@
     sessionStorage.setItem('cmng_initData', initData);
   }
 
+  if (!webToken && !initData) {
+    window.location.href = '/login.html';
+  }
+
+  if (savedUser && savedUser.name) {
+    document.getElementById('name').textContent = savedUser.name;
+    document.getElementById('modalUser').textContent = savedUser.username || savedUser.name;
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  if (webToken) {
+    headers['Authorization'] = 'Bearer ' + webToken;
+  }
+
   fetch('/api/me', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ initData: initData })
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify({ initData: initData, token: webToken })
   })
-  .then(function(r) { return r.json(); })
+  .then(function(r) {
+    if (r.status === 401 && !initData) {
+      localStorage.removeItem('casino_token');
+      localStorage.removeItem('casino_user');
+      window.location.href = '/login.html';
+      return null;
+    }
+    return r.json();
+  })
   .then(function(data) {
-      if(data.error) {
-          document.getElementById('err').textContent = data.error;
-          return;
-      }
-      document.getElementById('name').textContent = data.name;
-      document.getElementById('balance').textContent = '$' + data.balance;
+    if (!data) return;
+    if (data.error) {
+      document.getElementById('err').textContent = data.error;
+      return;
+    }
+    document.getElementById('name').textContent = data.name;
+    document.getElementById('balance').textContent = '$' + Number(data.balance || 0);
+    document.getElementById('modalUser').textContent = data.username || data.name || '—';
   })
   .catch(function(err) {
-      console.error("Error crítico en /api/me:", err);
-      document.getElementById('err').textContent = 'Error de conexión con el servidor.';
+    console.error("Error crítico en /api/me:", err);
+    document.getElementById('err').textContent = 'Error de conexión con el servidor.';
+  });
+
+  document.getElementById('openWithdraw').addEventListener('click', function() {
+    document.getElementById('withdrawModal').classList.add('open');
+  });
+
+  document.getElementById('closeWithdraw').addEventListener('click', function() {
+    document.getElementById('withdrawModal').classList.remove('open');
+  });
+
+  document.getElementById('logoutBtn').addEventListener('click', function() {
+    localStorage.removeItem('casino_token');
+    localStorage.removeItem('casino_user');
+    window.location.href = '/login.html';
   });
 </script>
 </body>
