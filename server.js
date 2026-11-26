@@ -3,21 +3,28 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
-const { getOrCreateUser, getUser, listUsers, applyDelta } = require('./db');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const {
+  getOrCreateUser,
+  getUser,
+  getUserByUsername,
+  createWebUser,
+  listUsers,
+  applyDelta
+} = require('./db');
 const { verifyInitData } = require('./telegramAuth');
 const pokerLogic = require('./pokerLogic');
 const minasLogic = require('./minas');
 const hiloLogic = require('./hilo');
-const carreras = require('./carreras'); // <--- Módulo de carreras integrado[cite: 4, 5]
+const carreras = require('./carreras');
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_SECRET = process.env.ADMIN_SECRET;
+const BOT_TOKEN = process.env.BOT_TOKEN || '';
+const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
+const STAFF_SECRET_1 = process.env.STAFF_SECRET_1 || '';
+const STAFF_SECRET_2 = process.env.STAFF_SECRET_2 || '';
+const JWT_SECRET = process.env.JWT_SECRET || 'clave_temporal_cambiar_en_render';
 const PORT = process.env.PORT || 3000;
-
-if (!BOT_TOKEN) {
-  console.error('Falta BOT_TOKEN en tu archivo .env (te lo da @BotFather)');
-  process.exit(1);
-}
 
 const app = express();
 const server = http.createServer(app);
@@ -30,17 +37,145 @@ app.get('/', function (req, res) {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// ---------- Autenticación de cada request del jugador ----------
+function signSessionToken(user) {
+  return jwt.sign(
+    {
+      id: Number(user.telegram_id),
+      username: user.username || user.first_name || 'jugador'
+    },
+    JWT_SECRET,
+    { expiresIn: '30d' }
+  );
+}
+
+// ---------- Registro y Login Web ----------
+app.post('/api/auth/register', async function (req, res) {
+  try {
+    var rawUsername = String(req.body.username || '').trim().toLowerCase();
+    var password = String(req.body.password || '');
+    var email = req.body.email ? String(req.body.email).trim().toLowerCase() : null;
+    var firstName = req.body.firstName ? String(req.body.firstName).trim() : rawUsername;
+
+    if (!/^[a-z0-9_]{3,20}$/.test(rawUsername)) {
+      return res.status(400).json({
+        error: 'El usuario debe tener entre 3 y 20 caracteres (letras, números o guion bajo).'
+      });
+    }
+    if (password.length < 4) {
+      return res.status(400).json({ error: 'La contraseña debe tener al menos 4 caracteres.' });
+    }
+
+    var existing = await getUserByUsername(rawUsername);
+    if (existing) {
+      return res.status(400).json({ error: 'Ese nombre de usuario ya está registrado.' });
+    }
+
+    var passwordHash = await bcrypt.hash(password, 10);
+    var created = await createWebUser({
+      username: rawUsername,
+      passwordHash: passwordHash,
+      email: email,
+      firstName: firstName
+    });
+
+    var token = signSessionToken(created);
+    return res.json({
+      token: token,
+      user: {
+        id: Number(created.telegram_id),
+        username: created.username,
+        name: created.first_name || created.username,
+        balance: Number(created.balance) || 0
+      }
+    });
+  } catch (e) {
+    console.error('Error en /api/auth/register:', e);
+    return res.status(500).json({ error: 'No se pudo completar el registro.' });
+  }
+});
+
+app.post('/api/auth/login', async function (req, res) {
+  try {
+    var rawUsername = String(req.body.username || '').trim().toLowerCase();
+    var password = String(req.body.password || '');
+
+    if (!rawUsername || !password) {
+      return res.status(400).json({ error: 'Ingresa tu usuario y contraseña.' });
+    }
+
+    var user = await getUserByUsername(rawUsername);
+    if (!user || !user.password_hash) {
+      return res.status(401).json({ error: 'Usuario o contraseña incorrectos.' });
+    }
+
+    var valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: 'Usuario o contraseña incorrectos.' });
+    }
+
+    var token = signSessionToken(user);
+    return res.json({
+      token: token,
+      user: {
+        id: Number(user.telegram_id),
+        username: user.username,
+        name: user.first_name || user.username,
+        balance: Number(user.balance) || 0
+      }
+    });
+  } catch (e) {
+    console.error('Error en /api/auth/login:', e);
+    return res.status(500).json({ error: 'Error al iniciar sesión.' });
+  }
+});
+
+// ---------- Autenticación híbrida (Token Web + Telegram) ----------
 function requireTelegramUser(req, res, next) {
-  var user = verifyInitData(req.body.initData || req.query.initData, BOT_TOKEN);
-  if (!user) return res.status(401).json({ error: 'No se pudo verificar tu sesión de Telegram.' });
-  req.tgUser = user;
-  next();
+  var authHeader = req.headers.authorization || '';
+  var bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  var token = (req.body && req.body.token) || (req.query && req.query.token) || bearerToken;
+
+  if (token) {
+    try {
+      var decoded = jwt.verify(token, JWT_SECRET);
+      req.tgUser = {
+        id: Number(decoded.id),
+        username: decoded.username,
+        first_name: decoded.username,
+        authType: 'web'
+      };
+      return next();
+    } catch (e) {
+      return res.status(401).json({ error: 'Tu sesión expiró. Vuelve a iniciar sesión.' });
+    }
+  }
+
+  var initData = (req.body && req.body.initData) || (req.query && req.query.initData);
+  if (initData && BOT_TOKEN) {
+    var user = verifyInitData(initData, BOT_TOKEN);
+    if (user) {
+      req.tgUser = user;
+      return next();
+    }
+  }
+
+  return res.status(401).json({ error: 'Debes iniciar sesión para continuar.' });
+}
+
+function resolveStaffRole(secret) {
+  if (!secret) return null;
+  if (ADMIN_SECRET && secret === ADMIN_SECRET) return 'Dealer / Admin';
+  if (STAFF_SECRET_1 && secret === STAFF_SECRET_1) return 'Colaborador 1';
+  if (STAFF_SECRET_2 && secret === STAFF_SECRET_2) return 'Colaborador 2';
+  return null;
 }
 
 function requireAdmin(req, res, next) {
-  var secret = req.body.adminSecret || req.query.adminSecret;
-  if (!secret || secret !== ADMIN_SECRET) return res.status(401).json({ error: 'Clave de dealer incorrecta.' });
+  var secret = (req.body && req.body.adminSecret) || req.query.adminSecret;
+  var role = resolveStaffRole(secret);
+  if (!role) return res.status(401).json({ error: 'Clave de acceso incorrecta.' });
+  req.staffRole = role;
+  req.staffName = (req.body && req.body.staffName) ? String(req.body.staffName).trim() : role;
   next();
 }
 
@@ -48,17 +183,22 @@ function requireAdmin(req, res, next) {
 app.post('/api/me', requireTelegramUser, async function (req, res) {
   try {
     var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
-    res.json({ id: u.telegram_id, name: u.first_name || u.username || ('Jugador ' + u.telegram_id), balance: u.balance });
+    res.json({
+      id: u.telegram_id,
+      username: u.username,
+      name: u.first_name || u.username || ('Jugador ' + u.telegram_id),
+      balance: u.balance
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ---------- Panel del dealer ----------
+// ---------- Panel del dealer y colaboradores ----------
 app.post('/api/admin/users', requireAdmin, async function (req, res) {
   try {
     var users = await listUsers();
-    res.json(users);
+    res.json({ role: req.staffRole, users: users });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -67,10 +207,16 @@ app.post('/api/admin/users', requireAdmin, async function (req, res) {
 app.post('/api/admin/recharge', requireAdmin, async function (req, res) {
   var telegramId = parseInt(req.body.telegramId, 10);
   var amount = parseInt(req.body.amount, 10);
-  if (!telegramId || !amount) return res.status(400).json({ error: 'Faltan datos.' });
+  if (!telegramId || !amount || amount === 0) {
+    return res.status(400).json({ error: 'Faltan datos o monto inválido.' });
+  }
+
   try {
-    var newBalance = await applyDelta(telegramId, amount, 'recarga', 'Recarga autorizada por el dealer');
-    res.json({ ok: true, balance: newBalance });
+    var operatorLabel = req.staffName || req.staffRole;
+    var kind = amount > 0 ? 'recarga' : 'retiro_pago';
+    var detail = (amount > 0 ? 'Recarga' : 'Pago/descuento') + ' por ' + operatorLabel;
+    var newBalance = await applyDelta(telegramId, amount, kind, detail);
+    res.json({ ok: true, balance: newBalance, by: operatorLabel });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
@@ -79,25 +225,43 @@ app.post('/api/admin/recharge', requireAdmin, async function (req, res) {
 // ---------- BLACKJACK ----------
 const suits = [{ s: '♠', red: false }, { s: '♣', red: false }, { s: '♥', red: true }, { s: '♦', red: true }];
 const ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K'];
-const blackjackSessions = {}; 
+const blackjackSessions = {};
 
 function freshDeck() {
   var d = [];
-  suits.forEach(function (su) { ranks.forEach(function (r) { d.push({ rank: r, suit: su.s, red: su.red }); }); });
+  suits.forEach(function (su) {
+    ranks.forEach(function (r) {
+      d.push({ rank: r, suit: su.s, red: su.red });
+    });
+  });
   for (var k = d.length - 1; k > 0; k--) {
     var r = Math.floor(Math.random() * (k + 1));
-    var t = d[k]; d[k] = d[r]; d[r] = t;
+    var t = d[k];
+    d[k] = d[r];
+    d[r] = t;
   }
   return d;
 }
-function cardValue(c) { if (c.rank === 'A') return 11; if (['J', 'Q', 'K'].indexOf(c.rank) !== -1) return 10; return parseInt(c.rank, 10); }
+function cardValue(c) {
+  if (c.rank === 'A') return 11;
+  if (['J', 'Q', 'K'].indexOf(c.rank) !== -1) return 10;
+  return parseInt(c.rank, 10);
+}
 function handTotal(h) {
   var total = 0, aces = 0;
-  h.forEach(function (c) { total += cardValue(c); if (c.rank === 'A') aces++; });
-  while (total > 21 && aces > 0) { total -= 10; aces--; }
+  h.forEach(function (c) {
+    total += cardValue(c);
+    if (c.rank === 'A') aces++;
+  });
+  while (total > 21 && aces > 0) {
+    total -= 10;
+    aces--;
+  }
   return total;
 }
-function isBlackjack(h) { return h.length === 2 && handTotal(h) === 21; }
+function isBlackjack(h) {
+  return h.length === 2 && handTotal(h) === 21;
+}
 
 function publicState(session, revealDealer) {
   return {
@@ -117,7 +281,12 @@ app.post('/api/blackjack/deal', requireTelegramUser, async function (req, res) {
     if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
 
     var deck = freshDeck();
-    var session = { deck: deck, playerHand: [deck.pop(), deck.pop()], dealerHand: [deck.pop(), deck.pop()], bet: bet };
+    var session = {
+      deck: deck,
+      playerHand: [deck.pop(), deck.pop()],
+      dealerHand: [deck.pop(), deck.pop()],
+      bet: bet
+    };
     blackjackSessions[req.tgUser.id] = session;
 
     if (isBlackjack(session.playerHand)) {
@@ -128,7 +297,12 @@ app.post('/api/blackjack/deal', requireTelegramUser, async function (req, res) {
         newBalance = await applyDelta(req.tgUser.id, delta, 'blackjack', 'Blackjack — paga 3 a 2');
       }
       delete blackjackSessions[req.tgUser.id];
-      return res.json({ status: dealerBJ ? 'push' : 'blackjack', state: publicState(session, true), balance: newBalance, delta: delta });
+      return res.json({
+        status: dealerBJ ? 'push' : 'blackjack',
+        state: publicState(session, true),
+        balance: newBalance,
+        delta: delta
+      });
     }
 
     res.json({ status: 'playing', state: publicState(session, false), balance: u.balance });
@@ -147,7 +321,12 @@ app.post('/api/blackjack/hit', requireTelegramUser, async function (req, res) {
     if (total > 21) {
       var newBalance = await applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Se pasó de 21');
       delete blackjackSessions[req.tgUser.id];
-      return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
+      return res.json({
+        status: 'lose',
+        state: publicState(session, true),
+        balance: newBalance,
+        delta: -session.bet
+      });
     }
 
     var currentUser = await getUser(req.tgUser.id);
@@ -170,9 +349,16 @@ async function dealerPlayAndResolve(telegramId, session) {
   var d = handTotal(session.dealerHand);
   var status, delta = 0;
 
-  if (d > 21 || p > d) { status = 'win'; delta = session.bet; }
-  else if (p < d) { status = 'lose'; delta = -session.bet; }
-  else { status = 'push'; delta = 0; }
+  if (d > 21 || p > d) {
+    status = 'win';
+    delta = session.bet;
+  } else if (p < d) {
+    status = 'lose';
+    delta = -session.bet;
+  } else {
+    status = 'push';
+    delta = 0;
+  }
 
   var newBalance = await applyDelta(telegramId, delta, 'blackjack', 'Resultado: ' + status);
   delete blackjackSessions[telegramId];
@@ -184,7 +370,12 @@ app.post('/api/blackjack/stand', requireTelegramUser, async function (req, res) 
     var session = blackjackSessions[req.tgUser.id];
     if (!session) return res.status(400).json({ error: 'No hay una mano activa.' });
     var result = await dealerPlayAndResolve(req.tgUser.id, session);
-    res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
+    res.json({
+      status: result.status,
+      state: publicState(session, true),
+      balance: result.balance,
+      delta: result.delta
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -205,11 +396,21 @@ app.post('/api/blackjack/double', requireTelegramUser, async function (req, res)
     if (total > 21) {
       var newBalance = await applyDelta(req.tgUser.id, -session.bet, 'blackjack', 'Doblar y se pasó de 21');
       delete blackjackSessions[req.tgUser.id];
-      return res.json({ status: 'lose', state: publicState(session, true), balance: newBalance, delta: -session.bet });
+      return res.json({
+        status: 'lose',
+        state: publicState(session, true),
+        balance: newBalance,
+        delta: -session.bet
+      });
     }
 
     var result = await dealerPlayAndResolve(req.tgUser.id, session);
-    res.json({ status: result.status, state: publicState(session, true), balance: result.balance, delta: result.delta });
+    res.json({
+      status: result.status,
+      state: publicState(session, true),
+      balance: result.balance,
+      delta: result.delta
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -236,10 +437,16 @@ const ZERO_WEIGHT = 0.5;
 const weights = order.map(function (n) { return n === 0 ? ZERO_WEIGHT : 1; });
 const totalWeight = weights.reduce(function (a, b) { return a + b; }, 0);
 
-function colorOf(n) { if (n === 0) return 'green'; return redNumbers.indexOf(n) !== -1 ? 'red' : 'black'; }
+function colorOf(n) {
+  if (n === 0) return 'green';
+  return redNumbers.indexOf(n) !== -1 ? 'red' : 'black';
+}
 function spinWheel() {
   var r = Math.random() * totalWeight, acc = 0;
-  for (var i = 0; i < order.length; i++) { acc += weights[i]; if (r < acc) return order[i]; }
+  for (var i = 0; i < order.length; i++) {
+    acc += weights[i];
+    if (r < acc) return order[i];
+  }
   return order[order.length - 1];
 }
 
@@ -251,7 +458,9 @@ app.post('/api/roulette/spin', requireTelegramUser, async function (req, res) {
     var amount = parseInt(req.body.amount, 10);
     if (!amount || amount <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
     if (amount > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
-    if (betType === 'numero' && (isNaN(number) || number < 0 || number > 36)) return res.status(400).json({ error: 'Número inválido.' });
+    if (betType === 'numero' && (isNaN(number) || number < 0 || number > 36)) {
+      return res.status(400).json({ error: 'Número inválido.' });
+    }
 
     var winNumber = spinWheel();
     var c = colorOf(winNumber);
@@ -351,7 +560,7 @@ app.post('/api/videopoker/draw', requireTelegramUser, async function (req, res) 
 });
 
 // ---------- MINAS ----------
-const minasSessions = {}; 
+const minasSessions = {};
 
 app.post('/api/minas/state', requireTelegramUser, async function (req, res) {
   try {
@@ -371,7 +580,9 @@ app.post('/api/minas/start', requireTelegramUser, async function (req, res) {
 
     if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
     if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
-    if (minasLogic.ALLOWED_MINES.indexOf(minesCount) === -1) return res.status(400).json({ error: 'Cantidad de minas inválida.' });
+    if (minasLogic.ALLOWED_MINES.indexOf(minesCount) === -1) {
+      return res.status(400).json({ error: 'Cantidad de minas inválida.' });
+    }
 
     var newBalance = await applyDelta(req.tgUser.id, -bet, 'minas', 'Apuesta inicial de Minas');
 
@@ -382,7 +593,7 @@ app.post('/api/minas/start', requireTelegramUser, async function (req, res) {
       bombs: bombs,
       revealed: [],
       mult: 1,
-      publicState: function() {
+      publicState: function () {
         return { revealed: this.revealed, mult: this.mult, bet: this.bet, minesCount: this.minesCount };
       }
     };
@@ -446,7 +657,7 @@ app.post('/api/minas/cashout', requireTelegramUser, async function (req, res) {
 });
 
 // ---------- HI-LO ----------
-const hiloSessions = {}; 
+const hiloSessions = {};
 
 app.post('/api/hilo/state', requireTelegramUser, async function (req, res) {
   try {
@@ -475,7 +686,7 @@ app.post('/api/hilo/start', requireTelegramUser, async function (req, res) {
       current: current,
       rounds: 0,
       pCum: 1,
-      publicState: function() {
+      publicState: function () {
         var pHigh = hiloLogic.probGuess(this.deck, this.current.val, 'higher');
         var pLow = hiloLogic.probGuess(this.deck, this.current.val, 'lower');
         var pEqual = hiloLogic.probGuess(this.deck, this.current.val, 'equal');
@@ -570,7 +781,7 @@ app.post('/api/hilo/cashout', requireTelegramUser, async function (req, res) {
   }
 });
 
-// ---------- CARRERAS DE CABALLOS (Corregido con async/await) ----------
+// ---------- CARRERAS DE CABALLOS ----------
 app.post('/api/carreras/state', requireTelegramUser, async function (req, res) {
   try {
     await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
@@ -585,7 +796,12 @@ app.post('/api/carreras/bet', requireTelegramUser, async function (req, res) {
   try {
     var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
     var name = u.first_name || u.username || ('Jugador ' + u.telegram_id);
-    var r = await carreras.placeBet(req.tgUser.id, name, parseInt(req.body.horse, 10), parseInt(req.body.amount, 10));
+    var r = await carreras.placeBet(
+      req.tgUser.id,
+      name,
+      parseInt(req.body.horse, 10),
+      parseInt(req.body.amount, 10)
+    );
     if (r.error) return res.status(400).json(r);
     res.json(r);
   } catch (e) {
@@ -598,11 +814,60 @@ carreras.start();
 // ---------- GESTIÓN DE WEBSOCKETS (PÓKER MULTIJUGADOR) ----------
 const multiplayerPokerRooms = {};
 
-io.on('connection', function(socket) {
+function broadcastRoomState(roomId) {
+  var room = multiplayerPokerRooms[roomId];
+  if (!room) return;
+  io.to(roomId).emit('room_state', {
+    roomId: roomId,
+    players: room.players,
+    communityCards: room.communityCards,
+    pot: room.pot,
+    currentTurnIndex: room.currentTurnIndex,
+    status: room.status,
+    dealerMessage: room.dealerMessage
+  });
+}
+
+function triggerShowdown(room, activePlayers) {
+  var bestScore = -1;
+  var winners = [];
+
+  activePlayers.forEach(function (p) {
+    var combined = p.cards.concat(room.communityCards);
+    var evalRes = pokerLogic.evalHand ? pokerLogic.evalHand(combined) : 'Carta alta';
+    var score = pokerLogic.PAY_TABLE && pokerLogic.PAY_TABLE[evalRes] ? pokerLogic.PAY_TABLE[evalRes] : 1;
+    p.lastHandEvaluation = evalRes;
+    if (score > bestScore) {
+      bestScore = score;
+      winners = [p];
+    } else if (score === bestScore) {
+      winners.push(p);
+    }
+  });
+
+  if (winners.length > 0 && room.pot > 0) {
+    var share = Math.floor(room.pot / winners.length);
+    winners.forEach(function (w) {
+      w.chips += share;
+    });
+    room.dealerMessage =
+      '🏆 Ganador(es): ' +
+      winners.map(function (w) { return w.name + ' (' + (w.lastHandEvaluation || 'Mano') + ')'; }).join(', ') +
+      ' — Pozo: $' +
+      room.pot;
+  } else {
+    room.dealerMessage = 'Mano finalizada.';
+  }
+
+  room.status = 'finished';
+  room.pot = 0;
+}
+
+io.on('connection', function (socket) {
   console.log('Cliente conectado por WebSockets:', socket.id);
 
-  socket.on('join_multiplayer_table', async function(data) {
-    var roomId = data.roomId || 'mesa_poker_1';
+  socket.on('join_multiplayer_table', async function (data) {
+    var roomId = (data && data.roomId) || 'mesa_poker_1';
     socket.join(roomId);
 
     if (!multiplayerPokerRooms[roomId]) {
@@ -612,16 +877,16 @@ io.on('connection', function(socket) {
         communityCards: [],
         pot: 0,
         currentTurnIndex: 0,
-        status: 'waiting', 
+        status: 'waiting',
         dealerMessage: 'Esperando jugadores...'
       };
     }
 
     var room = multiplayerPokerRooms[roomId];
-    var existingPlayer = room.players.find(function(p) { return p.id === socket.id; });
-    
+    var existingPlayer = room.players.find(function (p) { return p.id === socket.id; });
+
     if (!existingPlayer) {
-      var tgId = data.telegramId ? parseInt(data.telegramId, 10) : null;
+      var tgId = data && data.telegramId ? parseInt(data.telegramId, 10) : null;
       var userRecord = null;
 
       try {
@@ -632,13 +897,13 @@ io.on('connection', function(socket) {
         console.error('Error buscando usuario para póker:', err);
       }
 
-      var initialChips = userRecord ? userRecord.balance : (data.chips || 1000);
+      var initialChips = userRecord ? userRecord.balance : ((data && data.chips) || 1000);
       var realTelegramId = userRecord ? userRecord.telegram_id : tgId;
 
       room.players.push({
         id: socket.id,
         telegramId: realTelegramId,
-        name: data.name || (userRecord ? userRecord.first_name : 'Jugador'),
+        name: (data && data.name) || (userRecord ? userRecord.first_name : 'Jugador'),
         chips: initialChips,
         initialHandChips: initialChips,
         currentBet: 0,
@@ -651,15 +916,15 @@ io.on('connection', function(socket) {
     broadcastRoomState(roomId);
   });
 
-  socket.on('leave_multiplayer_table', async function(data) {
-    var roomId = data.roomId || 'mesa_poker_1';
+  socket.on('leave_multiplayer_table', async function (data) {
+    var roomId = (data && data.roomId) || 'mesa_poker_1';
     var room = multiplayerPokerRooms[roomId];
     if (!room) return;
 
-    var leavingPlayerIndex = room.players.findIndex(function(p) { return p.id === socket.id; });
+    var leavingPlayerIndex = room.players.findIndex(function (p) { return p.id === socket.id; });
     if (leavingPlayerIndex !== -1) {
       var leavingPlayer = room.players[leavingPlayerIndex];
-      
+
       if (typeof leavingPlayer.telegramId === 'number') {
         var diff = leavingPlayer.chips - leavingPlayer.initialHandChips;
         if (diff !== 0) {
@@ -673,14 +938,14 @@ io.on('connection', function(socket) {
 
       room.players.splice(leavingPlayerIndex, 1);
       if (room.players.length < 2) room.status = 'waiting';
-      
+
       broadcastRoomState(roomId);
     }
     socket.leave(roomId);
   });
 
-  socket.on('start_hand', function(data) {
-    var roomId = data.roomId || 'mesa_poker_1';
+  socket.on('start_hand', function (data) {
+    var roomId = (data && data.roomId) || 'mesa_poker_1';
     var room = multiplayerPokerRooms[roomId];
     if (!room || room.players.length < 2) return;
 
@@ -695,7 +960,7 @@ io.on('connection', function(socket) {
     room.status = 'betting';
     room.currentTurnIndex = 0;
 
-    room.players.forEach(function(p) {
+    room.players.forEach(function (p) {
       p.cards = [room.deck.pop(), room.deck.pop()];
       p.currentBet = 0;
       p.hasActed = false;
@@ -707,20 +972,20 @@ io.on('connection', function(socket) {
     broadcastRoomState(roomId);
   });
 
-  socket.on('player_action', function(data) {
-    var roomId = data.roomId || 'mesa_poker_1';
+  socket.on('player_action', function (data) {
+    var roomId = (data && data.roomId) || 'mesa_poker_1';
     var room = multiplayerPokerRooms[roomId];
     if (!room || room.status !== 'betting') return;
 
     var currentPlayer = room.players[room.currentTurnIndex];
     if (!currentPlayer || currentPlayer.id !== socket.id) return;
 
-    var action = data.action; 
+    var action = data.action;
     var amount = parseInt(data.amount, 10) || 0;
 
     if (action === 'bet') {
       var maxCurrentBet = 0;
-      room.players.forEach(function(p) {
+      room.players.forEach(function (p) {
         if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
       });
 
@@ -729,13 +994,13 @@ io.on('connection', function(socket) {
 
       var totalInvestment = neededToCall;
       if (neededToCall === 0) {
-        totalInvestment = raiseAmount > 0 ? raiseAmount : 50; 
+        totalInvestment = raiseAmount > 0 ? raiseAmount : 50;
       } else if (raiseAmount > 0 && raiseAmount !== neededToCall) {
         totalInvestment = neededToCall + raiseAmount;
       }
 
       if (totalInvestment > currentPlayer.chips) {
-        totalInvestment = currentPlayer.chips; 
+        totalInvestment = currentPlayer.chips;
       }
 
       currentPlayer.chips -= totalInvestment;
@@ -744,9 +1009,9 @@ io.on('connection', function(socket) {
       currentPlayer.hasActed = true;
 
       if (currentPlayer.currentBet > maxCurrentBet) {
-        room.players.forEach(function(p) {
+        room.players.forEach(function (p) {
           if (p.id !== currentPlayer.id && !p.folded) {
-            p.hasActed = false; 
+            p.hasActed = false;
           }
         });
         room.dealerMessage = currentPlayer.name + ' subió la apuesta a $' + currentPlayer.currentBet;
@@ -755,14 +1020,14 @@ io.on('connection', function(socket) {
       }
     } else if (action === 'check') {
       var maxCurrentBet = 0;
-      room.players.forEach(function(p) {
+      room.players.forEach(function (p) {
         if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
       });
 
       if (maxCurrentBet > currentPlayer.currentBet) {
         var neededToCall = maxCurrentBet - currentPlayer.currentBet;
         if (neededToCall > currentPlayer.chips) neededToCall = currentPlayer.chips;
-        
+
         currentPlayer.chips -= neededToCall;
         currentPlayer.currentBet += neededToCall;
         room.pot += neededToCall;
@@ -777,7 +1042,7 @@ io.on('connection', function(socket) {
       room.dealerMessage = currentPlayer.name + ' se retiró.';
     }
 
-    var activePlayers = room.players.filter(function(p) { return !p.folded; });
+    var activePlayers = room.players.filter(function (p) { return !p.folded; });
 
     if (activePlayers.length === 1) {
       activePlayers[0].chips += room.pot;
@@ -791,12 +1056,12 @@ io.on('connection', function(socket) {
     }
 
     var currentMaxBet = 0;
-    activePlayers.forEach(function(p) {
+    activePlayers.forEach(function (p) {
       if (p.currentBet > currentMaxBet) currentMaxBet = p.currentBet;
     });
 
-    var allActed = activePlayers.every(function(p) { return p.hasActed; });
-    var allBetsEqual = activePlayers.every(function(p) { return p.currentBet === currentMaxBet; });
+    var allActed = activePlayers.every(function (p) { return p.hasActed; });
+    var allBetsEqual = activePlayers.every(function (p) { return p.currentBet === currentMaxBet; });
 
     if (allActed && allBetsEqual) {
       triggerShowdown(room, activePlayers);
@@ -814,13 +1079,13 @@ io.on('connection', function(socket) {
     broadcastRoomState(roomId);
   });
 
-  socket.on('disconnect', async function() {
+  socket.on('disconnect', async function () {
     console.log('Cliente desconectado de WebSockets:', socket.id);
     for (var roomId in multiplayerPokerRooms) {
       var room = multiplayerPokerRooms[roomId];
       var initialLength = room.players.length;
-      
-      var leavingPlayer = room.players.find(function(p) { return p.id === socket.id; });
+
+      var leavingPlayer = room.players.find(function (p) { return p.id === socket.id; });
       if (leavingPlayer && typeof leavingPlayer.telegramId === 'number') {
         var diff = leavingPlayer.chips - leavingPlayer.initialHandChips;
         if (diff !== 0) {
@@ -832,8 +1097,8 @@ io.on('connection', function(socket) {
         }
       }
 
-      room.players = room.players.filter(function(p) { return p.id !== socket.id; });
-      
+      room.players = room.players.filter(function (p) { return p.id !== socket.id; });
+
       if (room.players.length !== initialLength) {
         if (room.players.length < 2) room.status = 'waiting';
         broadcastRoomState(roomId);
@@ -859,35 +1124,6 @@ async function sincronizarSaldosBD(room) {
   }
 }
 
-function triggerShowdown(room, activePlayers) {
-  room.status = 'finished';
-
-  var bestPlayer = activePlayers[0];
-  var bestScoreDescription = 'Carta Alta';
-  var highestScore = -1;
-
-  activePlayers.forEach(function(p) {
-    var evaluation = pokerLogic.evalBestHand(p.cards, room.communityCards);
-    p.lastHandEvaluation = evaluation.name;
-
-    if (evaluation.score > highestScore) {
-      highestScore = evaluation.score;
-      bestPlayer = p;
-      bestScoreDescription = evaluation.name;
-    }
-  });
-
-  bestPlayer.chips += room.pot;
-  room.dealerMessage = '🏆 ¡GANADOR! ' + bestPlayer.name + ' gana el pozo de $' + room.pot + ' con ' + bestScoreDescription + '!';
-  room.pot = 0;
-}
-
-function broadcastRoomState(roomId) {
-  var room = multiplayerPokerRooms[roomId];
-  if (!room) return;
-  io.to(roomId).emit('update_multiplayer_table', room);
-}
-
 server.listen(PORT, function () {
-  console.log('Casino con soporte multijugador corriendo en el puerto ' + PORT);
+  console.log('Casino por pinche gusto corriendo en el puerto ' + PORT);
 });
