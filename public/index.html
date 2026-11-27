@@ -23,6 +23,44 @@
     cursor: pointer;
     font-size: .88rem;
   }
+  .info-box {
+    margin-top: 12px;
+    padding: 11px 12px;
+    border-radius: 10px;
+    background: rgba(255,255,255,.04);
+    border: 1px solid rgba(245,185,66,.22);
+    font-size: .82rem;
+    color: #cbd5e1;
+    line-height: 1.45;
+  }
+  .info-title {
+    font-size: .76rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    color: #f5b942;
+    margin-bottom: 6px;
+  }
+  .eq-list {
+    margin: 0;
+    padding-left: 16px;
+  }
+  .eq-list li {
+    margin-bottom: 3px;
+  }
+  .info-footer {
+    margin-top: 7px;
+    padding-top: 7px;
+    border-top: 1px solid rgba(255,255,255,.08);
+    font-size: .78rem;
+    color: #94a3b8;
+  }
+  .info-footer p {
+    margin: 0 0 4px;
+  }
+  .info-footer p:last-child {
+    margin-bottom: 0;
+  }
   .modal-backdrop {
     position: fixed;
     inset: 0;
@@ -80,6 +118,20 @@
       <button type="button" class="btn-secondary" id="openWithdraw">💸 Retirar saldo</button>
       <button type="button" class="btn-secondary" id="logoutBtn">Cerrar sesión</button>
     </div>
+
+    <div class="info-box">
+      <div class="info-title">Equivalencia de fichas</div>
+      <ul class="eq-list">
+        <li><strong>1 millón de dinero de Diplomacia</strong> = <strong>1 millón de fichas</strong></li>
+        <li><strong>1 peso MXN</strong> = <strong>5 fichas</strong></li>
+        <li><strong>1T de Rival Regions</strong> = <strong>6 fichas</strong></li>
+      </ul>
+      <div class="info-footer">
+        <p><strong>Recargas:</strong> Si quieres recargar saldo, contacta a los <strong>administradores</strong>.</p>
+        <p><strong>Retiros:</strong> Solicítalos por Telegram a <strong>@GringoMerce</strong> o con el admin donde solicitaste tus depósitos.</p>
+        <p>Próximamente se agregarán más juegos.</p>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -87,9 +139,10 @@
 <div class="modal-backdrop" id="withdrawModal">
   <div class="modal-card">
     <h3>Cómo solicitar un retiro</h3>
-    <p>Para retirar tu saldo, manda un mensaje directo en <strong>Telegram</strong> indicando:</p>
+    <p>Solicita tu retiro por <strong>Telegram</strong> a <strong>@GringoMerce</strong> o con el <strong>admin</strong> al que le solicitaste tus depósitos, indicando:</p>
     <p>1. Tu <strong>usuario</strong> en Casino por pinche gusto (<code id="modalUser">—</code>).</p>
     <p>2. Tu <strong>enlace del juego</strong> para el envío, o bien tu <strong>ID de Binance</strong> para hacer la transferencia.</p>
+    <p style="font-size:.82rem; color:#94a3b8;">¿Necesitas recargar? Contacta a los administradores. Equivalencia: 1M Diplomacia = 1M fichas · $1 MXN = 5 fichas · 1T Rival Regions = 6 fichas.</p>
     <button type="button" class="btn-secondary" style="width:100%; margin-top:8px;" id="closeWithdraw">Entendido</button>
   </div>
 </div>
