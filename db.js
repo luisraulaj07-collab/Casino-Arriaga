@@ -62,6 +62,36 @@ async function initDb() {
       );
     `);
 
+    // Saldo operativo propio de cada colaborador
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS staff_wallets (
+        staff_key TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        balance INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+
+    await db.execute(`
+      INSERT OR IGNORE INTO staff_wallets (staff_key, label, balance)
+      VALUES ('staff_1', 'Colaborador 1', 0), ('staff_2', 'Colaborador 2', 0)
+    `);
+
+    // Historial de movimientos de colaboradores y recargas del admin
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS staff_movements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        staff_key TEXT NOT NULL,
+        staff_name TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        target_user_id INTEGER,
+        amount INTEGER NOT NULL,
+        balance_after INTEGER,
+        detail TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+
     console.log("Tablas inicializadas correctamente en Turso.");
   } catch (error) {
     console.error("Error al inicializar la base de datos:", error);
@@ -175,6 +205,106 @@ async function applyDelta(telegramId, delta, game, detail) {
   return newBalance;
 }
 
+async function getStaffWallets() {
+  await db.execute(`
+    INSERT OR IGNORE INTO staff_wallets (staff_key, label, balance)
+    VALUES ('staff_1', 'Colaborador 1', 0), ('staff_2', 'Colaborador 2', 0)
+  `);
+  const res = await db.execute("SELECT staff_key, label, balance, updated_at FROM staff_wallets");
+  const wallets = {};
+  res.rows.forEach((row) => {
+    wallets[row.staff_key] = {
+      staff_key: row.staff_key,
+      label: row.label,
+      balance: Number(row.balance) || 0,
+      updated_at: row.updated_at,
+    };
+  });
+  return wallets;
+}
+
+async function adjustStaffWallet({ staffKey, staffName, actionType, targetUserId, amount, detail }) {
+  const wallets = await getStaffWallets();
+  const wallet = wallets[staffKey];
+  if (!wallet) throw new Error("Colaborador no encontrado");
+
+  const currentBalance = Number(wallet.balance) || 0;
+  const numericAmount = Number(amount) || 0;
+  const nextBalance = currentBalance + numericAmount;
+
+  if (nextBalance < 0) {
+    throw new Error("Saldo operativo insuficiente en el colaborador");
+  }
+
+  await db.execute({
+    sql: "UPDATE staff_wallets SET balance = ?, updated_at = datetime('now') WHERE staff_key = ?",
+    args: [nextBalance, staffKey],
+  });
+
+  await db.execute({
+    sql: `
+      INSERT INTO staff_movements (staff_key, staff_name, action_type, target_user_id, amount, balance_after, detail)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `,
+    args: [
+      staffKey,
+      staffName || wallet.label,
+      actionType || "ajuste",
+      targetUserId || null,
+      numericAmount,
+      nextBalance,
+      detail || "",
+    ],
+  });
+
+  return { balance: nextBalance };
+}
+
+async function logAdminMovement({ staffKey, staffName, actionType, targetUserId, amount, detail }) {
+  await db.execute({
+    sql: `
+      INSERT INTO staff_movements (staff_key, staff_name, action_type, target_user_id, amount, balance_after, detail)
+      VALUES (?, ?, ?, ?, ?, NULL, ?)
+    `,
+    args: [
+      staffKey || "admin",
+      staffName || "Admin",
+      actionType || "ajuste",
+      targetUserId || null,
+      Number(amount) || 0,
+      detail || "",
+    ],
+  });
+}
+
+async function listStaffMovements(staffKey, limit = 50) {
+  const safeLimit = Math.max(1, Math.min(200, Number(limit) || 50));
+  if (staffKey) {
+    const res = await db.execute({
+      sql: `
+        SELECT id, staff_key, staff_name, action_type, target_user_id, amount, balance_after, detail, created_at
+        FROM staff_movements
+        WHERE staff_key = ?
+        ORDER BY id DESC
+        LIMIT ?
+      `,
+      args: [staffKey, safeLimit],
+    });
+    return res.rows;
+  }
+
+  const res = await db.execute({
+    sql: `
+      SELECT id, staff_key, staff_name, action_type, target_user_id, amount, balance_after, detail, created_at
+      FROM staff_movements
+      ORDER BY id DESC
+      LIMIT ?
+    `,
+    args: [safeLimit],
+  });
+  return res.rows;
+}
+
 module.exports = {
   getOrCreateUser,
   getUser,
@@ -182,5 +312,9 @@ module.exports = {
   createWebUser,
   listUsers,
   applyDelta,
+  getStaffWallets,
+  adjustStaffWallet,
+  logAdminMovement,
+  listStaffMovements,
   db,
 };
