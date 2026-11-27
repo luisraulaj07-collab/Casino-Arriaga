@@ -15,23 +15,45 @@
     color: var(--gold);
     margin-bottom: 10px;
   }
-  .user-row {
+  .section-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--gold);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .user-row, .mov-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
     padding: 8px 0;
     border-top: 1px solid rgba(255,255,255,0.08);
-    font-size: 13px;
+    font-size: 12px;
     gap: 8px;
   }
   .user-meta {
     color: var(--gold-dim);
     font-size: 11px;
   }
+  .mov-list {
+    max-height: 240px;
+    overflow-y: auto;
+  }
+  .pos {
+    color: #7fd88f;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .neg {
+    color: #f08080;
+    font-weight: 700;
+    white-space: nowrap;
+  }
 </style>
 </head>
 <body>
-<div class="table black" style="max-width:640px">
+<div class="table black" style="max-width:680px">
   <div class="brand">CASINO POR PINCHE GUSTO</div>
   <div class="brand-sub">PANEL DEL DEALER Y COLABORADORES</div>
 
@@ -40,16 +62,29 @@
     <div class="row" style="flex-wrap:wrap">
       <input type="text" id="staffName" placeholder="Tu nombre o alias (ej. Colaborador 1)">
       <input type="password" id="secret" placeholder="Clave de acceso (ADMIN_SECRET o clave staff)">
-      <button id="loadBtn">Ver jugadores</button>
+      <button id="loadBtn">Ver panel</button>
     </div>
     <div class="error" id="err"></div>
   </div>
 
-  <div class="panel" id="usersPanel" style="display:none">
-    <div id="usersList"></div>
+  <!-- Bloque exclusivo del Admin para dar saldo operativo a colaboradores -->
+  <div class="panel" id="staffFundPanel" style="display:none">
+    <div class="section-title">Saldo operativo de colaboradores</div>
+    <div id="walletsSummary" style="margin-bottom:10px"></div>
+    <div class="row" style="flex-wrap:wrap">
+      <select id="staffTargetSelect">
+        <option value="staff_1">Colaborador 1</option>
+        <option value="staff_2">Colaborador 2</option>
+      </select>
+      <input type="number" id="staffFundAmount" min="1" placeholder="Monto a dar al colaborador">
+      <button id="staffFundBtn">Dar saldo</button>
+    </div>
+    <div class="msg" id="staffFundMsg"></div>
   </div>
 
+  <!-- Recargar o descontar saldo a jugadores -->
   <div class="panel" id="rechargePanel" style="display:none">
+    <div class="section-title">Operación con jugador</div>
     <div class="row" style="flex-wrap:wrap">
       <select id="userSelect"></select>
       <select id="actionType">
@@ -62,6 +97,18 @@
     <div class="msg" id="rechargeMsg"></div>
   </div>
 
+  <!-- Lista de jugadores -->
+  <div class="panel" id="usersPanel" style="display:none">
+    <div class="section-title">Jugadores</div>
+    <div id="usersList"></div>
+  </div>
+
+  <!-- Historial de movimientos -->
+  <div class="panel" id="movementsPanel" style="display:none">
+    <div class="section-title">Historial de movimientos</div>
+    <div id="movementsList" class="mov-list"></div>
+  </div>
+
   <a class="lobby-link" href="index.html">← Volver a la mesa principal</a>
 </div>
 
@@ -72,6 +119,12 @@
     secret: document.getElementById('secret'),
     loadBtn: document.getElementById('loadBtn'),
     err: document.getElementById('err'),
+    staffFundPanel: document.getElementById('staffFundPanel'),
+    walletsSummary: document.getElementById('walletsSummary'),
+    staffTargetSelect: document.getElementById('staffTargetSelect'),
+    staffFundAmount: document.getElementById('staffFundAmount'),
+    staffFundBtn: document.getElementById('staffFundBtn'),
+    staffFundMsg: document.getElementById('staffFundMsg'),
     usersPanel: document.getElementById('usersPanel'),
     usersList: document.getElementById('usersList'),
     rechargePanel: document.getElementById('rechargePanel'),
@@ -79,7 +132,9 @@
     actionType: document.getElementById('actionType'),
     amount: document.getElementById('amount'),
     rechargeBtn: document.getElementById('rechargeBtn'),
-    rechargeMsg: document.getElementById('rechargeMsg')
+    rechargeMsg: document.getElementById('rechargeMsg'),
+    movementsPanel: document.getElementById('movementsPanel'),
+    movementsList: document.getElementById('movementsList')
   };
 
   // Recuperar clave y alias en la pestaña actual para no reescribirlos a cada rato
@@ -91,7 +146,59 @@
     return u.username ? (base + ' (@' + u.username + ')') : String(base);
   }
 
-  function loadUsers() {
+  function renderWallets(wallets) {
+    if (!wallets) return;
+    var s1 = (wallets.staff_1 && wallets.staff_1.balance) || 0;
+    var s2 = (wallets.staff_2 && wallets.staff_2.balance) || 0;
+    el.walletsSummary.innerHTML =
+      '<div class="user-row"><span><b>Colaborador 1</b> (saldo operativo)</span><b>$' + Number(s1) + '</b></div>' +
+      '<div class="user-row"><span><b>Colaborador 2</b> (saldo operativo)</span><b>$' + Number(s2) + '</b></div>';
+  }
+
+  function renderMovements(movements) {
+    el.movementsList.innerHTML = '';
+    if (!movements || !movements.length) {
+      el.movementsList.innerHTML = '<div class="user-meta">Sin movimientos registrados aún.</div>';
+      el.movementsPanel.style.display = '';
+      return;
+    }
+
+    movements.forEach(function(m) {
+      var row = document.createElement('div');
+      row.className = 'mov-row';
+
+      var left = document.createElement('div');
+      var title = document.createElement('b');
+      title.style.color = 'var(--gold)';
+      title.textContent = (m.staff_name || m.staff_key) + ' — ' + (m.detail || m.action_type);
+
+      var sub = document.createElement('div');
+      sub.className = 'user-meta';
+      var metaParts = [];
+      if (m.created_at) metaParts.push(m.created_at);
+      if (m.target_user_id) metaParts.push('Jugador ID: ' + m.target_user_id);
+      if (m.balance_after !== null && m.balance_after !== undefined) {
+        metaParts.push('Saldo op.: $' + Number(m.balance_after));
+      }
+      sub.textContent = metaParts.join(' · ');
+
+      left.appendChild(title);
+      left.appendChild(sub);
+
+      var amt = Number(m.amount || 0);
+      var right = document.createElement('div');
+      right.className = amt >= 0 ? 'pos' : 'neg';
+      right.textContent = (amt >= 0 ? '+$' : '-$') + Math.abs(amt);
+
+      row.appendChild(left);
+      row.appendChild(right);
+      el.movementsList.appendChild(row);
+    });
+
+    el.movementsPanel.style.display = '';
+  }
+
+  function loadPanel() {
     el.err.textContent = '';
     var secretVal = el.secret.value.trim();
     var staffVal = el.staffName.value.trim();
@@ -113,9 +220,25 @@
         el.err.textContent = data.error;
         return;
       }
+
       var list = Array.isArray(data) ? data : (data.users || []);
       var roleLabel = (!Array.isArray(data) && data.role) ? data.role : 'Dealer / Admin';
-      el.staffRole.textContent = 'Acceso: ' + roleLabel + (staffVal ? ' — ' + staffVal : '');
+      var isAdmin = (!Array.isArray(data) && data.isAdmin !== undefined)
+        ? Boolean(data.isAdmin)
+        : (roleLabel.toLowerCase().indexOf('admin') !== -1 || roleLabel.toLowerCase().indexOf('dealer') !== -1);
+
+      var roleText = 'Acceso: ' + roleLabel + (staffVal ? ' — ' + staffVal : '');
+      if (!isAdmin && data.staffBalance !== null && data.staffBalance !== undefined) {
+        roleText += ' · Tu saldo operativo: $' + Number(data.staffBalance);
+      }
+      el.staffRole.textContent = roleText;
+
+      if (isAdmin) {
+        el.staffFundPanel.style.display = '';
+        renderWallets(data.wallets);
+      } else {
+        el.staffFundPanel.style.display = 'none';
+      }
 
       el.usersList.innerHTML = '';
       el.userSelect.innerHTML = '';
@@ -149,13 +272,47 @@
 
       el.usersPanel.style.display = list.length ? '' : 'none';
       el.rechargePanel.style.display = list.length ? '' : 'none';
+      renderMovements(data.movements || []);
     })
     .catch(function() {
-      el.err.textContent = 'Error de conexión al consultar jugadores.';
+      el.err.textContent = 'Error de conexión al cargar el panel.';
     });
   }
 
-  el.loadBtn.addEventListener('click', loadUsers);
+  el.loadBtn.addEventListener('click', loadPanel);
+
+  el.staffFundBtn.addEventListener('click', function() {
+    el.staffFundMsg.textContent = '';
+    var targetStaff = el.staffTargetSelect.value;
+    var fundAmt = parseInt(el.staffFundAmount.value, 10);
+    if (!fundAmt || fundAmt <= 0) {
+      el.staffFundMsg.textContent = 'Escribe un monto mayor a 0.';
+      return;
+    }
+
+    fetch('/api/admin/staff-fund', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        adminSecret: el.secret.value.trim(),
+        staffKey: targetStaff,
+        amount: fundAmt
+      })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        el.staffFundMsg.textContent = data.error;
+        return;
+      }
+      el.staffFundMsg.textContent = 'Saldo operativo actualizado para colaborador: $' + data.balance;
+      el.staffFundAmount.value = '';
+      loadPanel();
+    })
+    .catch(function() {
+      el.staffFundMsg.textContent = 'Error al dar saldo al colaborador.';
+    });
+  });
 
   el.rechargeBtn.addEventListener('click', function() {
     el.rechargeMsg.textContent = '';
@@ -189,7 +346,7 @@
       }
       el.rechargeMsg.textContent = 'Listo (' + (isPayout ? 'Pago/descuento' : 'Recarga') + ') — nuevo saldo: $' + data.balance;
       el.amount.value = '';
-      loadUsers();
+      loadPanel();
     })
     .catch(function() {
       el.rechargeMsg.textContent = 'Error al actualizar el saldo.';
@@ -197,7 +354,7 @@
   });
 
   if (el.secret.value) {
-    loadUsers();
+    loadPanel();
   }
 </script>
 </body>
