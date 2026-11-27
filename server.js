@@ -785,12 +785,14 @@ app.post('/api/hilo/start', requireTelegramUser, async function (req, res) {
     if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
     if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
 
+    // Se descuenta la apuesta al instante de iniciar la ronda para evitar escapes al salir
     var newBalance = await applyDelta(req.tgUser.id, -bet, 'hilo', 'Apuesta inicial Hi-Lo');
     var deck = hiloLogic.freshDeck();
     var current = deck.pop();
 
     var session = {
       bet: bet,
+      betDeducted: true,
       deck: deck,
       current: current,
       rounds: 0,
@@ -885,6 +887,24 @@ app.post('/api/hilo/cashout', requireTelegramUser, async function (req, res) {
     delete hiloSessions[req.tgUser.id];
 
     res.json({ payout: payout, balance: newBalance });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/hilo/abandon', requireTelegramUser, async function (req, res) {
+  try {
+    var session = hiloSessions[req.tgUser.id];
+    if (!session) return res.json({ ok: true, active: false });
+
+    // Si por algún motivo no se había descontado al iniciar, se descuenta aquí; si ya se descontó, solo se cierra
+    var u = await getUser(req.tgUser.id);
+    var balance = u ? u.balance : 0;
+    if (!session.betDeducted && session.bet > 0) {
+      balance = await applyDelta(req.tgUser.id, -session.bet, 'hilo', 'Abandonó partida activa de Hi-Lo');
+    }
+    delete hiloSessions[req.tgUser.id];
+    res.json({ ok: true, active: true, balance: balance });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
