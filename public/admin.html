@@ -82,23 +82,23 @@
       <button type="button" class="btn-logout" id="logoutBtn" style="display:none">Cerrar sesión</button>
     </div>
     <div class="row" style="flex-wrap:wrap">
-      <input type="text" id="staffName" placeholder="Tu nombre o alias (ej. Colaborador 1)">
+      <input type="text" id="staffName" placeholder="Tu nombre o alias (ej. Espinal o Alejandro)">
       <input type="password" id="secret" placeholder="Clave de acceso (ADMIN_SECRET o clave staff)">
       <button id="loadBtn">Ver panel</button>
     </div>
     <div class="error" id="err"></div>
   </div>
 
-  <!-- Bloque exclusivo del Admin para dar saldo operativo a colaboradores -->
+  <!-- Bloque exclusivo del Admin para dar o descontar saldo operativo a colaboradores -->
   <div class="panel" id="staffFundPanel" style="display:none">
     <div class="section-title">Saldo operativo de colaboradores</div>
     <div id="walletsSummary" style="margin-bottom:10px"></div>
     <div class="row" style="flex-wrap:wrap">
       <select id="staffTargetSelect">
-        <option value="staff_1">Colaborador 1</option>
-        <option value="staff_2">Colaborador 2</option>
+        <option value="staff_1">Espinal (Colaborador 1)</option>
+        <option value="staff_2">Alejandro (Colaborador 2)</option>
       </select>
-      <input type="number" id="staffFundAmount" min="1" placeholder="Monto a dar al colaborador">
+      <input type="number" id="staffFundAmount" step="1" placeholder="Monto (+ dar / - descontar)">
       <button id="staffFundBtn">Dar saldo</button>
     </div>
     <div class="msg" id="staffFundMsg"></div>
@@ -139,6 +139,10 @@
 
 <script>
   var allUsers = [];
+  var STAFF_LABELS = {
+    staff_1: 'Espinal (Colaborador 1)',
+    staff_2: 'Alejandro (Colaborador 2)'
+  };
 
   var el = {
     staffRole: document.getElementById('staffRole'),
@@ -168,6 +172,20 @@
 
   el.secret.value = sessionStorage.getItem('cpg_staff_secret') || '';
   el.staffName.value = sessionStorage.getItem('cpg_staff_name') || '';
+
+  function syncFundButtonText() {
+    var val = parseInt(el.staffFundAmount.value, 10);
+    el.staffFundBtn.textContent = (!isNaN(val) && val < 0) ? 'Descontar saldo' : 'Dar saldo';
+  }
+
+  function formatStaffDisplay(m) {
+    if (m.staff_key && STAFF_LABELS[m.staff_key]) {
+      return STAFF_LABELS[m.staff_key];
+    }
+    if (m.staff_name === 'Colaborador 1') return STAFF_LABELS.staff_1;
+    if (m.staff_name === 'Colaborador 2') return STAFF_LABELS.staff_2;
+    return m.staff_name || m.staff_key || 'Staff';
+  }
 
   function formatLabel(u) {
     var base = u.first_name || u.username || u.telegram_id;
@@ -242,8 +260,8 @@
     var s1 = (wallets.staff_1 && wallets.staff_1.balance) || 0;
     var s2 = (wallets.staff_2 && wallets.staff_2.balance) || 0;
     el.walletsSummary.innerHTML =
-      '<div class="user-row"><span><b>Colaborador 1</b> (saldo operativo)</span><b>$' + Number(s1) + '</b></div>' +
-      '<div class="user-row"><span><b>Colaborador 2</b> (saldo operativo)</span><b>$' + Number(s2) + '</b></div>';
+      '<div class="user-row"><span><b>Espinal</b> (Colaborador 1 · saldo operativo)</span><b>$' + Number(s1) + '</b></div>' +
+      '<div class="user-row"><span><b>Alejandro</b> (Colaborador 2 · saldo operativo)</span><b>$' + Number(s2) + '</b></div>';
   }
 
   function renderMovements(movements) {
@@ -261,7 +279,7 @@
       var left = document.createElement('div');
       var title = document.createElement('b');
       title.style.color = 'var(--gold)';
-      title.textContent = (m.staff_name || m.staff_key) + ' — ' + (m.detail || m.action_type);
+      title.textContent = formatStaffDisplay(m) + ' — ' + (m.detail || m.action_type);
 
       var sub = document.createElement('div');
       sub.className = 'user-meta';
@@ -298,6 +316,7 @@
     el.userSearch.value = '';
     el.amount.value = '';
     el.staffFundAmount.value = '';
+    syncFundButtonText();
     el.err.textContent = '';
     el.rechargeMsg.textContent = '';
     el.staffFundMsg.textContent = '';
@@ -365,13 +384,14 @@
   el.loadBtn.addEventListener('click', loadPanel);
   el.logoutBtn.addEventListener('click', logoutPanel);
   el.userSearch.addEventListener('input', renderFilteredUsers);
+  el.staffFundAmount.addEventListener('input', syncFundButtonText);
 
   el.staffFundBtn.addEventListener('click', function() {
     el.staffFundMsg.textContent = '';
     var targetStaff = el.staffTargetSelect.value;
     var fundAmt = parseInt(el.staffFundAmount.value, 10);
-    if (!fundAmt || fundAmt <= 0) {
-      el.staffFundMsg.textContent = 'Escribe un monto mayor a 0.';
+    if (!fundAmt || isNaN(fundAmt) || fundAmt === 0) {
+      el.staffFundMsg.textContent = 'Escribe un monto distinto de 0 (positivo para dar, negativo para descontar).';
       return;
     }
 
@@ -390,12 +410,15 @@
         el.staffFundMsg.textContent = data.error;
         return;
       }
-      el.staffFundMsg.textContent = 'Saldo operativo actualizado para colaborador: $' + data.balance;
+      el.staffFundMsg.textContent =
+        (fundAmt < 0 ? 'Saldo descontado correctamente. Nuevo saldo operativo de ' : 'Saldo operativo actualizado para ') +
+        (STAFF_LABELS[targetStaff] || targetStaff) + ': $' + data.balance;
       el.staffFundAmount.value = '';
+      syncFundButtonText();
       loadPanel();
     })
     .catch(function() {
-      el.staffFundMsg.textContent = 'Error al dar saldo al colaborador.';
+      el.staffFundMsg.textContent = 'Error al actualizar el saldo del colaborador.';
     });
   });
 
