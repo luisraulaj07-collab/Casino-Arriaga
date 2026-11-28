@@ -1131,8 +1131,230 @@ io.on('connection', function (socket) {
       var initialChips = userRecord ? userRecord.balance : ((data && data.chips) || 1000);
       var realTelegramId = userRecord ? userRecord.telegram_id : tgId;
 
-      room.players.push({
+     room.players.push({
         id: socket.id,
         telegramId: realTelegramId,
         name: (data && data.name) || (userRecord ? userRecord.first_name : 'Jugador'),
-        chips: initialChips
+        chips: initialChips,
+        initialHandChips: initialChips,
+        currentBet: 0,
+        hasActed: false,
+        cards: [],
+        folded: false
+      });
+    }
+
+    broadcastRoomState(roomId);
+  });
+
+  socket.on('leave_multiplayer_table', async function (data) {
+    var roomId = (data && data.roomId) || 'mesa_poker_1';
+    var room = multiplayerPokerRooms[roomId];
+    if (!room) return;
+
+    var leavingPlayerIndex = room.players.findIndex(function (p) { return p.id === socket.id; });
+    if (leavingPlayerIndex !== -1) {
+      var leavingPlayer = room.players[leavingPlayerIndex];
+
+      if (typeof leavingPlayer.telegramId === 'number') {
+        var diff = leavingPlayer.chips - leavingPlayer.initialHandChips;
+        if (diff !== 0) {
+          try {
+            await applyDelta(leavingPlayer.telegramId, diff, 'poker', 'Retiro definitivo de mesa de póker');
+          } catch (e) {
+            console.error('Error al guardar saldo al salir de la mesa:', e);
+          }
+        }
+      }
+
+      room.players.splice(leavingPlayerIndex, 1);
+      if (room.players.length < 2) room.status = 'waiting';
+
+      broadcastRoomState(roomId);
+    }
+    socket.leave(roomId);
+  });
+
+  socket.on('start_hand', function (data) {
+    var roomId = (data && data.roomId) || 'mesa_poker_1';
+    var room = multiplayerPokerRooms[roomId];
+    if (!room || room.players.length < 2) return;
+
+    if (room.status === 'betting') {
+      socket.emit('error_message', 'No se puede iniciar una nueva mano mientras la partida actual está en curso.');
+      return;
+    }
+
+    room.deck = pokerLogic.freshDeck();
+    room.pot = 0;
+    room.communityCards = room.deck.splice(0, 5);
+    room.status = 'betting';
+    room.currentTurnIndex = 0;
+
+    room.players.forEach(function (p) {
+      p.cards = [room.deck.pop(), room.deck.pop()];
+      p.currentBet = 0;
+      p.hasActed = false;
+      p.folded = false;
+      p.lastHandEvaluation = null;
+    });
+
+    room.dealerMessage = '¡Mano iniciada! Turno de ' + room.players[0].name;
+    broadcastRoomState(roomId);
+  });
+
+  socket.on('player_action', function (data) {
+    var roomId = (data && data.roomId) || 'mesa_poker_1';
+    var room = multiplayerPokerRooms[roomId];
+    if (!room || room.status !== 'betting') return;
+
+    var currentPlayer = room.players[room.currentTurnIndex];
+    if (!currentPlayer || currentPlayer.id !== socket.id) return;
+
+    var action = data.action;
+    var amount = parseInt(data.amount, 10) || 0;
+
+    if (action === 'bet') {
+      var maxCurrentBet = 0;
+      room.players.forEach(function (p) {
+        if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
+      });
+
+      var neededToCall = maxCurrentBet - currentPlayer.currentBet;
+      var raiseAmount = amount > 0 ? amount : 0;
+
+      var totalInvestment = neededToCall;
+      if (neededToCall === 0) {
+        totalInvestment = raiseAmount > 0 ? raiseAmount : 50;
+      } else if (raiseAmount > 0 && raiseAmount !== neededToCall) {
+        totalInvestment = neededToCall + raiseAmount;
+      }
+
+      if (totalInvestment > currentPlayer.chips) {
+        totalInvestment = currentPlayer.chips;
+      }
+
+      currentPlayer.chips -= totalInvestment;
+      currentPlayer.currentBet += totalInvestment;
+      room.pot += totalInvestment;
+      currentPlayer.hasActed = true;
+
+      if (currentPlayer.currentBet > maxCurrentBet) {
+        room.players.forEach(function (p) {
+          if (p.id !== currentPlayer.id && !p.folded) {
+            p.hasActed = false;
+          }
+        });
+        room.dealerMessage = currentPlayer.name + ' subió la apuesta a $' + currentPlayer.currentBet;
+      } else {
+        room.dealerMessage = currentPlayer.name + ' igualó la apuesta ($' + totalInvestment + ')';
+      }
+    } else if (action === 'check') {
+      var maxCurrentBet = 0;
+      room.players.forEach(function (p) {
+        if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
+      });
+
+      if (maxCurrentBet > currentPlayer.currentBet) {
+        var neededToCall = maxCurrentBet - currentPlayer.currentBet;
+        if (neededToCall > currentPlayer.chips) neededToCall = currentPlayer.chips;
+
+        currentPlayer.chips -= neededToCall;
+        currentPlayer.currentBet += neededToCall;
+        room.pot += neededToCall;
+        room.dealerMessage = currentPlayer.name + ' igualó por valor de $' + neededToCall;
+      } else {
+        room.dealerMessage = currentPlayer.name + ' pasó (Check).';
+      }
+      currentPlayer.hasActed = true;
+    } else if (action === 'fold') {
+      currentPlayer.folded = true;
+      currentPlayer.hasActed = true;
+      room.dealerMessage = currentPlayer.name + ' se retiró.';
+    }
+
+    var activePlayers = room.players.filter(function (p) { return !p.folded; });
+
+    if (activePlayers.length === 1) {
+      activePlayers[0].chips += room.pot;
+      room.dealerMessage = '🏆 ¡' + activePlayers[0].name + ' gana el pozo de $' + room.pot + ' por retirada!';
+      room.status = 'finished';
+      room.pot = 0;
+
+      sincronizarSaldosBD(room);
+      broadcastRoomState(roomId);
+      return;
+    }
+
+    var currentMaxBet = 0;
+    activePlayers.forEach(function (p) {
+      if (p.currentBet > currentMaxBet) currentMaxBet = p.currentBet;
+    });
+
+    var allActed = activePlayers.every(function (p) { return p.hasActed; });
+    var allBetsEqual = activePlayers.every(function (p) { return p.currentBet === currentMaxBet; });
+
+    if (allActed && allBetsEqual) {
+      triggerShowdown(room, activePlayers);
+      sincronizarSaldosBD(room);
+      broadcastRoomState(roomId);
+      return;
+    }
+
+    var turnsChecked = 0;
+    do {
+      room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
+      turnsChecked++;
+    } while (room.players[room.currentTurnIndex].folded && turnsChecked < room.players.length);
+
+    broadcastRoomState(roomId);
+  });
+
+  socket.on('disconnect', async function () {
+    console.log('Cliente desconectado de WebSockets:', socket.id);
+    for (var roomId in multiplayerPokerRooms) {
+      var room = multiplayerPokerRooms[roomId];
+      var initialLength = room.players.length;
+
+      var leavingPlayer = room.players.find(function (p) { return p.id === socket.id; });
+      if (leavingPlayer && typeof leavingPlayer.telegramId === 'number') {
+        var diff = leavingPlayer.chips - leavingPlayer.initialHandChips;
+        if (diff !== 0) {
+          try {
+            await applyDelta(leavingPlayer.telegramId, diff, 'poker', 'Retiro de mesa multijugador');
+          } catch (e) {
+            console.error('Error al guardar saldo al desconectar:', e);
+          }
+        }
+      }
+
+      room.players = room.players.filter(function (p) { return p.id !== socket.id; });
+
+      if (room.players.length !== initialLength) {
+        if (room.players.length < 2) room.status = 'waiting';
+        broadcastRoomState(roomId);
+      }
+    }
+  });
+});
+
+async function sincronizarSaldosBD(room) {
+  for (var i = 0; i < room.players.length; i++) {
+    var p = room.players[i];
+    if (typeof p.telegramId === 'number') {
+      var diferencia = p.chips - p.initialHandChips;
+      if (diferencia !== 0) {
+        try {
+          await applyDelta(p.telegramId, diferencia, 'poker', 'Resultado de mano de póker multijugador');
+        } catch (err) {
+          console.error('Error aplicando delta en póker para usuario ' + p.telegramId + ':', err);
+        }
+      }
+      p.initialHandChips = p.chips;
+    }
+  }
+}
+
+server.listen(PORT, function () {
+  console.log('Casino por pinche gusto corriendo en el puerto ' + PORT);
+});
