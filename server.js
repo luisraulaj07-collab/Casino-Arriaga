@@ -5,6 +5,7 @@ const { Server } = require('socket.io');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const db = require('./db');
 const {
   getOrCreateUser,
   getUser,
@@ -16,7 +17,8 @@ const {
   adjustStaffWallet,
   logAdminMovement,
   listStaffMovements
-} = require('./db');
+} = db;
+const getUserByEmail = typeof db.getUserByEmail === 'function' ? db.getUserByEmail : null;
 const { verifyInitData } = require('./telegramAuth');
 const pokerLogic = require('./pokerLogic');
 const minasLogic = require('./minas');
@@ -57,7 +59,7 @@ app.post('/api/auth/register', async function (req, res) {
   try {
     var rawUsername = String(req.body.username || '').trim().toLowerCase();
     var password = String(req.body.password || '');
-    var email = req.body.email ? String(req.body.email).trim().toLowerCase() : null;
+    var email = String(req.body.email || '').trim().toLowerCase();
     var firstName = req.body.firstName ? String(req.body.firstName).trim() : rawUsername;
 
     if (!/^[a-z0-9_]{3,20}$/.test(rawUsername)) {
@@ -65,13 +67,25 @@ app.post('/api/auth/register', async function (req, res) {
         error: 'El usuario debe tener entre 3 y 20 caracteres (letras, números o guion bajo).'
       });
     }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({
+        error: 'El correo electrónico es obligatorio y debe tener un formato válido.'
+      });
+    }
     if (password.length < 4) {
       return res.status(400).json({ error: 'La contraseña debe tener al menos 4 caracteres.' });
     }
 
-    var existing = await getUserByUsername(rawUsername);
-    if (existing) {
+    var existingUsername = await getUserByUsername(rawUsername);
+    if (existingUsername) {
       return res.status(400).json({ error: 'Ese nombre de usuario ya está registrado.' });
+    }
+
+    if (getUserByEmail) {
+      var existingEmail = await getUserByEmail(email);
+      if (existingEmail) {
+        return res.status(400).json({ error: 'Ese correo electrónico ya está registrado en otra cuenta.' });
+      }
     }
 
     var passwordHash = await bcrypt.hash(password, 10);
@@ -94,6 +108,10 @@ app.post('/api/auth/register', async function (req, res) {
     });
   } catch (e) {
     console.error('Error en /api/auth/register:', e);
+    var msg = String((e && e.message) || '').toLowerCase();
+    if (msg.indexOf('unique') !== -1 || msg.indexOf('constraint') !== -1) {
+      return res.status(400).json({ error: 'El usuario o correo electrónico ya está registrado.' });
+    }
     return res.status(500).json({ error: 'No se pudo completar el registro.' });
   }
 });
@@ -261,17 +279,31 @@ app.post('/api/admin/staff-fund', requireStaffOrAdmin, requireOnlyAdmin, async f
     if (staffKey !== 'staff_1' && staffKey !== 'staff_2') {
       return res.status(400).json({ error: 'Colaborador inválido.' });
     }
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ error: 'Ingresa un monto mayor a 0 para recargar al colaborador.' });
+    if (!amount || isNaN(amount) || amount === 0) {
+      return res.status(400).json({ error: 'Ingresa un monto distinto de 0 (positivo para dar, negativo para descontar).' });
     }
+
+    var wallets = await getStaffWallets();
+    var currentBal = Number((wallets[staffKey] && wallets[staffKey].balance) || 0);
+    if (amount < 0 && currentBal < Math.abs(amount)) {
+      return res.status(400).json({
+        error: 'Saldo operativo insuficiente para descontar ($' + Math.abs(amount) + '). Disponible: $' + currentBal + '.'
+      });
+    }
+
+    var isAdd = amount > 0;
+    var absAmount = Math.abs(amount);
+    var staffLabel = staffKey === 'staff_1' ? 'Colaborador 1' : 'Colaborador 2';
 
     var result = await adjustStaffWallet({
       staffKey: staffKey,
-      staffName: staffKey === 'staff_1' ? 'Colaborador 1' : 'Colaborador 2',
-      actionType: 'admin_fund',
+      staffName: staffLabel,
+      actionType: isAdd ? 'admin_fund' : 'admin_deduct',
       targetUserId: null,
       amount: amount,
-      detail: 'Recarga de saldo operativo por ' + req.staff.staffName
+      detail: (isAdd
+        ? 'Recarga de saldo operativo (+$' + absAmount + ')'
+        : 'Descuento / liquidación de saldo operativo (-$' + absAmount + ')') + ' por ' + req.staff.staffName
     });
 
     res.json({ ok: true, balance: result.balance });
@@ -293,7 +325,7 @@ app.post('/api/admin/recharge', requireStaffOrAdmin, async function (req, res) {
 
     if (!req.staff.isAdmin && isRecharge) {
       var wallets = await getStaffWallets();
-      var currentStaffBal = (wallets[req.staff.staffKey] && wallets[req.staff.staffKey].balance) || 0;
+      var currentStaffBal = Number((wallets[req.staff.staffKey] && wallets[req.staff.staffKey].balance) || 0);
       if (currentStaffBal < absAmount) {
         return res.status(400).json({
           error: 'Saldo operativo insuficiente (' + currentStaffBal + '). Pide recarga al administrador.'
@@ -305,14 +337,17 @@ app.post('/api/admin/recharge', requireStaffOrAdmin, async function (req, res) {
     var newBalance = await applyDelta(telegramId, amount, isRecharge ? 'recarga' : 'retiro_pago', detail);
 
     if (!req.staff.isAdmin) {
-      var staffDelta = isRecharge ? -absAmount : 0;
+      // Si recarga al jugador se resta de su saldo operativo; si paga/descuenta al jugador se suma a su saldo operativo
+      var staffDelta = isRecharge ? -absAmount : absAmount;
       await adjustStaffWallet({
         staffKey: req.staff.staffKey,
         staffName: req.staff.staffName,
         actionType: isRecharge ? 'recharge' : 'payout',
         targetUserId: telegramId,
         amount: staffDelta,
-        detail: (isRecharge ? 'Recargó $' + absAmount : 'Pagó/descontó $' + absAmount) + ' a jugador #' + telegramId
+        detail: (isRecharge
+          ? 'Recargó $' + absAmount + ' a jugador #' + telegramId
+          : 'Pagó/descontó $' + absAmount + ' a jugador #' + telegramId + ' (+$' + absAmount + ' en saldo operativo)')
       });
     } else {
       await logAdminMovement({
@@ -785,7 +820,6 @@ app.post('/api/hilo/start', requireTelegramUser, async function (req, res) {
     if (!bet || bet <= 0) return res.status(400).json({ error: 'Apuesta inválida.' });
     if (bet > u.balance) return res.status(400).json({ error: 'Saldo insuficiente.' });
 
-    // Se descuenta la apuesta al instante de iniciar la ronda para evitar escapes al salir
     var newBalance = await applyDelta(req.tgUser.id, -bet, 'hilo', 'Apuesta inicial Hi-Lo');
     var deck = hiloLogic.freshDeck();
     var current = deck.pop();
@@ -897,7 +931,6 @@ app.post('/api/hilo/abandon', requireTelegramUser, async function (req, res) {
     var session = hiloSessions[req.tgUser.id];
     if (!session) return res.json({ ok: true, active: false });
 
-    // Si por algún motivo no se había descontado al iniciar, se descuenta aquí; si ya se descontó, solo se cierra
     var u = await getUser(req.tgUser.id);
     var balance = u ? u.balance : 0;
     if (!session.betDeducted && session.bet > 0) {
@@ -907,6 +940,75 @@ app.post('/api/hilo/abandon', requireTelegramUser, async function (req, res) {
     res.json({ ok: true, active: true, balance: balance });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// ---------- TRAGAMONEDAS (SLOTS) ----------
+const SLOT_SYMBOLS = [
+  { id: 'cherry',  icon: '🍒', weight: 30, mult3: 3,  mult2: 1 },
+  { id: 'lemon',   icon: '🍋', weight: 25, mult3: 5,  mult2: 0 },
+  { id: 'clover',  icon: '🍀', weight: 18, mult3: 10, mult2: 0 },
+  { id: 'bell',    icon: '🔔', weight: 12, mult3: 18, mult2: 0 },
+  { id: 'diamond', icon: '💎', weight: 8,  mult3: 35, mult2: 0 },
+  { id: 'seven',   icon: '7️⃣', weight: 4,  mult3: 80, mult2: 0 }
+];
+const SLOT_TOTAL_WEIGHT = SLOT_SYMBOLS.reduce(function (acc, s) { return acc + s.weight; }, 0);
+
+function pickSlotSymbol() {
+  var r = Math.random() * SLOT_TOTAL_WEIGHT;
+  var acc = 0;
+  for (var i = 0; i < SLOT_SYMBOLS.length; i++) {
+    acc += SLOT_SYMBOLS[i].weight;
+    if (r < acc) return SLOT_SYMBOLS[i];
+  }
+  return SLOT_SYMBOLS[SLOT_SYMBOLS.length - 1];
+}
+
+function evaluateReels(reels) {
+  var a = reels[0], b = reels[1], c = reels[2];
+  if (a.id === b.id && b.id === c.id) {
+    return { label: 'Triple ' + a.icon, mult: a.mult3 };
+  }
+  if (a.id === 'cherry' && b.id === 'cherry' && a.mult2 > 0) {
+    return { label: 'Doble 🍒', mult: a.mult2 };
+  }
+  return { label: 'Sin premio', mult: 0 };
+}
+
+app.post('/api/slots/spin', requireTelegramUser, async function (req, res) {
+  try {
+    var u = await getOrCreateUser(req.tgUser.id, req.tgUser.username, req.tgUser.first_name);
+    var bet = parseInt(req.body.bet, 10);
+
+    if (!bet || bet <= 0) {
+      return res.status(400).json({ error: 'Apuesta inválida.' });
+    }
+    if (bet > Number(u.balance || 0)) {
+      return res.status(400).json({ error: 'Saldo insuficiente.' });
+    }
+
+    var reels = [pickSlotSymbol(), pickSlotSymbol(), pickSlotSymbol()];
+    var verdict = evaluateReels(reels);
+    var winnings = bet * verdict.mult;
+    var delta = winnings - bet;
+
+    var newBalance = await applyDelta(
+      req.tgUser.id,
+      delta,
+      'slots',
+      'Tragamonedas (' + verdict.label + ')'
+    );
+
+    return res.json({
+      reels: reels.map(function (s) { return s.icon; }),
+      resultLabel: verdict.label,
+      mult: verdict.mult,
+      delta: delta,
+      balance: newBalance
+    });
+  } catch (e) {
+    console.error('Error en /api/slots/spin:', e);
+    return res.status(500).json({ error: 'No se pudo realizar el giro.' });
   }
 });
 
@@ -1033,226 +1135,4 @@ io.on('connection', function (socket) {
         id: socket.id,
         telegramId: realTelegramId,
         name: (data && data.name) || (userRecord ? userRecord.first_name : 'Jugador'),
-        chips: initialChips,
-        initialHandChips: initialChips,
-        currentBet: 0,
-        hasActed: false,
-        cards: [],
-        folded: false
-      });
-    }
-
-    broadcastRoomState(roomId);
-  });
-
-  socket.on('leave_multiplayer_table', async function (data) {
-    var roomId = (data && data.roomId) || 'mesa_poker_1';
-    var room = multiplayerPokerRooms[roomId];
-    if (!room) return;
-
-    var leavingPlayerIndex = room.players.findIndex(function (p) { return p.id === socket.id; });
-    if (leavingPlayerIndex !== -1) {
-      var leavingPlayer = room.players[leavingPlayerIndex];
-
-      if (typeof leavingPlayer.telegramId === 'number') {
-        var diff = leavingPlayer.chips - leavingPlayer.initialHandChips;
-        if (diff !== 0) {
-          try {
-            await applyDelta(leavingPlayer.telegramId, diff, 'poker', 'Retiro definitivo de mesa de póker');
-          } catch (e) {
-            console.error('Error al guardar saldo al salir de la mesa:', e);
-          }
-        }
-      }
-
-      room.players.splice(leavingPlayerIndex, 1);
-      if (room.players.length < 2) room.status = 'waiting';
-
-      broadcastRoomState(roomId);
-    }
-    socket.leave(roomId);
-  });
-
-  socket.on('start_hand', function (data) {
-    var roomId = (data && data.roomId) || 'mesa_poker_1';
-    var room = multiplayerPokerRooms[roomId];
-    if (!room || room.players.length < 2) return;
-
-    if (room.status === 'betting') {
-      socket.emit('error_message', 'No se puede iniciar una nueva mano mientras la partida actual está en curso.');
-      return;
-    }
-
-    room.deck = pokerLogic.freshDeck();
-    room.pot = 0;
-    room.communityCards = room.deck.splice(0, 5);
-    room.status = 'betting';
-    room.currentTurnIndex = 0;
-
-    room.players.forEach(function (p) {
-      p.cards = [room.deck.pop(), room.deck.pop()];
-      p.currentBet = 0;
-      p.hasActed = false;
-      p.folded = false;
-      p.lastHandEvaluation = null;
-    });
-
-    room.dealerMessage = '¡Mano iniciada! Turno de ' + room.players[0].name;
-    broadcastRoomState(roomId);
-  });
-
-  socket.on('player_action', function (data) {
-    var roomId = (data && data.roomId) || 'mesa_poker_1';
-    var room = multiplayerPokerRooms[roomId];
-    if (!room || room.status !== 'betting') return;
-
-    var currentPlayer = room.players[room.currentTurnIndex];
-    if (!currentPlayer || currentPlayer.id !== socket.id) return;
-
-    var action = data.action;
-    var amount = parseInt(data.amount, 10) || 0;
-
-    if (action === 'bet') {
-      var maxCurrentBet = 0;
-      room.players.forEach(function (p) {
-        if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
-      });
-
-      var neededToCall = maxCurrentBet - currentPlayer.currentBet;
-      var raiseAmount = amount > 0 ? amount : 0;
-
-      var totalInvestment = neededToCall;
-      if (neededToCall === 0) {
-        totalInvestment = raiseAmount > 0 ? raiseAmount : 50;
-      } else if (raiseAmount > 0 && raiseAmount !== neededToCall) {
-        totalInvestment = neededToCall + raiseAmount;
-      }
-
-      if (totalInvestment > currentPlayer.chips) {
-        totalInvestment = currentPlayer.chips;
-      }
-
-      currentPlayer.chips -= totalInvestment;
-      currentPlayer.currentBet += totalInvestment;
-      room.pot += totalInvestment;
-      currentPlayer.hasActed = true;
-
-      if (currentPlayer.currentBet > maxCurrentBet) {
-        room.players.forEach(function (p) {
-          if (p.id !== currentPlayer.id && !p.folded) {
-            p.hasActed = false;
-          }
-        });
-        room.dealerMessage = currentPlayer.name + ' subió la apuesta a $' + currentPlayer.currentBet;
-      } else {
-        room.dealerMessage = currentPlayer.name + ' igualó la apuesta ($' + totalInvestment + ')';
-      }
-    } else if (action === 'check') {
-      var maxCurrentBet = 0;
-      room.players.forEach(function (p) {
-        if (p.currentBet > maxCurrentBet) maxCurrentBet = p.currentBet;
-      });
-
-      if (maxCurrentBet > currentPlayer.currentBet) {
-        var neededToCall = maxCurrentBet - currentPlayer.currentBet;
-        if (neededToCall > currentPlayer.chips) neededToCall = currentPlayer.chips;
-
-        currentPlayer.chips -= neededToCall;
-        currentPlayer.currentBet += neededToCall;
-        room.pot += neededToCall;
-        room.dealerMessage = currentPlayer.name + ' igualó por valor de $' + neededToCall;
-      } else {
-        room.dealerMessage = currentPlayer.name + ' pasó (Check).';
-      }
-      currentPlayer.hasActed = true;
-    } else if (action === 'fold') {
-      currentPlayer.folded = true;
-      currentPlayer.hasActed = true;
-      room.dealerMessage = currentPlayer.name + ' se retiró.';
-    }
-
-    var activePlayers = room.players.filter(function (p) { return !p.folded; });
-
-    if (activePlayers.length === 1) {
-      activePlayers[0].chips += room.pot;
-      room.dealerMessage = '🏆 ¡' + activePlayers[0].name + ' gana el pozo de $' + room.pot + ' por retirada!';
-      room.status = 'finished';
-      room.pot = 0;
-
-      sincronizarSaldosBD(room);
-      broadcastRoomState(roomId);
-      return;
-    }
-
-    var currentMaxBet = 0;
-    activePlayers.forEach(function (p) {
-      if (p.currentBet > currentMaxBet) currentMaxBet = p.currentBet;
-    });
-
-    var allActed = activePlayers.every(function (p) { return p.hasActed; });
-    var allBetsEqual = activePlayers.every(function (p) { return p.currentBet === currentMaxBet; });
-
-    if (allActed && allBetsEqual) {
-      triggerShowdown(room, activePlayers);
-      sincronizarSaldosBD(room);
-      broadcastRoomState(roomId);
-      return;
-    }
-
-    var turnsChecked = 0;
-    do {
-      room.currentTurnIndex = (room.currentTurnIndex + 1) % room.players.length;
-      turnsChecked++;
-    } while (room.players[room.currentTurnIndex].folded && turnsChecked < room.players.length);
-
-    broadcastRoomState(roomId);
-  });
-
-  socket.on('disconnect', async function () {
-    console.log('Cliente desconectado de WebSockets:', socket.id);
-    for (var roomId in multiplayerPokerRooms) {
-      var room = multiplayerPokerRooms[roomId];
-      var initialLength = room.players.length;
-
-      var leavingPlayer = room.players.find(function (p) { return p.id === socket.id; });
-      if (leavingPlayer && typeof leavingPlayer.telegramId === 'number') {
-        var diff = leavingPlayer.chips - leavingPlayer.initialHandChips;
-        if (diff !== 0) {
-          try {
-            await applyDelta(leavingPlayer.telegramId, diff, 'poker', 'Retiro de mesa multijugador');
-          } catch (e) {
-            console.error('Error al guardar saldo al desconectar:', e);
-          }
-        }
-      }
-
-      room.players = room.players.filter(function (p) { return p.id !== socket.id; });
-
-      if (room.players.length !== initialLength) {
-        if (room.players.length < 2) room.status = 'waiting';
-        broadcastRoomState(roomId);
-      }
-    }
-  });
-});
-
-async function sincronizarSaldosBD(room) {
-  for (var i = 0; i < room.players.length; i++) {
-    var p = room.players[i];
-    if (typeof p.telegramId === 'number') {
-      var diferencia = p.chips - p.initialHandChips;
-      if (diferencia !== 0) {
-        try {
-          await applyDelta(p.telegramId, diferencia, 'poker', 'Resultado de mano de póker multijugador');
-        } catch (err) {
-          console.error('Error aplicando delta en póker para usuario ' + p.telegramId + ':', err);
-        }
-      }
-      p.initialHandChips = p.chips;
-    }
-  }
-}
-
-server.listen(PORT, function () {
-  console.log('Casino por pinche gusto corriendo en el puerto ' + PORT);
-});
+        chips: initialChips
